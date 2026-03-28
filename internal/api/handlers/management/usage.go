@@ -3,6 +3,8 @@ package management
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,7 +26,17 @@ type usageImportPayload struct {
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		includeDetails := strings.EqualFold(strings.TrimSpace(c.Query("include_details")), "true") || strings.TrimSpace(c.Query("include_details")) == "1"
+		detailsLimit := 0
+		if rawLimit := strings.TrimSpace(c.Query("details_limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				detailsLimit = parsed
+			}
+		}
+		snapshot = h.usageStats.SnapshotWithOptions(usage.SnapshotOptions{
+			IncludeDetails: includeDetails,
+			DetailsLimit:   detailsLimit,
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,

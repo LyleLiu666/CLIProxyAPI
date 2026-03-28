@@ -5,7 +5,10 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,9 +16,20 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
-var statisticsEnabled atomic.Bool
+const (
+	httpStatusBadRequest          = 400
+	defaultMaxDetailsPerModel     = 1000
+	statisticsPersistenceVersion  = 1
+	statisticsPersistenceWaitTime = 25 * time.Millisecond
+)
+
+var (
+	statisticsEnabled atomic.Bool
+	eventIDCounter    atomic.Uint64
+)
 
 func init() {
 	statisticsEnabled.Store(true)
@@ -29,17 +43,9 @@ type LoggerPlugin struct {
 }
 
 // NewLoggerPlugin constructs a new logger plugin instance.
-//
-// Returns:
-//   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
 func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
 
 // HandleUsage implements coreusage.Plugin.
-// It updates the in-memory statistics store whenever a usage record is received.
-//
-// Parameters:
-//   - ctx: The context for the usage record
-//   - record: The usage record to aggregate
 func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if !statisticsEnabled.Load() {
 		return
@@ -71,6 +77,13 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	maxDetailsPerModel int
+
+	persistMu      sync.Mutex
+	persistPath    string
+	persistPending bool
+	persistRunning bool
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -89,6 +102,7 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
+	EventID   string     `json:"event_id,omitempty"`
 	Timestamp time.Time  `json:"timestamp"`
 	LatencyMs int64      `json:"latency_ms"`
 	Source    string     `json:"source"`
@@ -135,6 +149,17 @@ type ModelSnapshot struct {
 	Details       []RequestDetail `json:"details"`
 }
 
+// SnapshotOptions controls how much request detail is copied into a snapshot.
+type SnapshotOptions struct {
+	IncludeDetails bool
+	DetailsLimit   int
+}
+
+type statisticsPersistencePayload struct {
+	Version int                `json:"version"`
+	Usage   StatisticsSnapshot `json:"usage"`
+}
+
 var defaultRequestStatistics = NewRequestStatistics()
 
 // GetRequestStatistics returns the shared statistics store.
@@ -143,12 +168,64 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		apis:               make(map[string]*apiStats),
+		requestsByDay:      make(map[string]int64),
+		requestsByHour:     make(map[int]int64),
+		tokensByDay:        make(map[string]int64),
+		tokensByHour:       make(map[int]int64),
+		maxDetailsPerModel: defaultMaxDetailsPerModel,
 	}
+}
+
+// ConfigurePersistence enables snapshot persistence at the provided file path and restores any existing snapshot.
+func (s *RequestStatistics) ConfigurePersistence(path string) error {
+	if s == nil {
+		return nil
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		s.persistMu.Lock()
+		s.persistPath = ""
+		s.persistPending = false
+		s.persistRunning = false
+		s.persistMu.Unlock()
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("usage: create persistence directory: %w", err)
+	}
+
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		payload := statisticsPersistencePayload{}
+		if err := json.Unmarshal(data, &payload); err == nil && payload.Usage.APIs != nil {
+			s.RestoreSnapshot(payload.Usage)
+		} else {
+			legacy := StatisticsSnapshot{}
+			if err := json.Unmarshal(data, &legacy); err != nil {
+				return fmt.Errorf("usage: decode persisted statistics: %w", err)
+			}
+			s.RestoreSnapshot(legacy)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("usage: read persisted statistics: %w", err)
+	}
+
+	s.persistMu.Lock()
+	s.persistPath = path
+	s.persistPending = false
+	s.persistRunning = false
+	s.persistMu.Unlock()
+	return nil
+}
+
+// RestoreSnapshot replaces in-memory state with the provided snapshot.
+func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restoreSnapshotLocked(snapshot)
 }
 
 // Record ingests a new usage record and updates the aggregates.
@@ -177,10 +254,17 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
+	requestDetail := RequestDetail{
+		EventID:   newEventID(timestamp),
+		Timestamp: timestamp,
+		LatencyMs: normaliseLatency(record.Latency),
+		Source:    record.Source,
+		AuthIndex: record.AuthIndex,
+		Tokens:    detail,
+		Failed:    failed,
+	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.totalRequests++
 	if success {
 		s.successCount++
@@ -194,19 +278,15 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
-	})
+	s.updateAPIStats(stats, modelName, requestDetail)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.mu.Unlock()
+
+	s.schedulePersist()
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -220,10 +300,20 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	if s.maxDetailsPerModel > 0 && len(modelStatsValue.Details) > s.maxDetailsPerModel {
+		overflow := len(modelStatsValue.Details) - s.maxDetailsPerModel
+		copy(modelStatsValue.Details, modelStatsValue.Details[overflow:])
+		modelStatsValue.Details = modelStatsValue.Details[:s.maxDetailsPerModel]
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
+	return s.SnapshotWithOptions(SnapshotOptions{IncludeDetails: true})
+}
+
+// SnapshotWithOptions returns a copy of the aggregated metrics with controllable detail copying.
+func (s *RequestStatistics) SnapshotWithOptions(opts SnapshotOptions) StatisticsSnapshot {
 	result := StatisticsSnapshot{}
 	if s == nil {
 		return result
@@ -245,13 +335,15 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
-			apiSnapshot.Models[modelName] = ModelSnapshot{
+			modelSnapshot := ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
-				Details:       requestDetails,
 			}
+			if opts.IncludeDetails {
+				requestDetails := cloneRequestDetails(modelStatsValue.Details, opts.DetailsLimit)
+				modelSnapshot.Details = requestDetails
+			}
+			apiSnapshot.Models[modelName] = modelSnapshot
 		}
 		result.APIs[apiName] = apiSnapshot
 	}
@@ -295,7 +387,6 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	seen := make(map[string]struct{})
 	for apiName, stats := range s.apis {
@@ -330,13 +421,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				modelName = "unknown"
 			}
 			for _, detail := range modelSnapshot.Details {
-				detail.Tokens = normaliseTokenStats(detail.Tokens)
-				if detail.LatencyMs < 0 {
-					detail.LatencyMs = 0
-				}
-				if detail.Timestamp.IsZero() {
-					detail.Timestamp = time.Now()
-				}
+				detail = normaliseRequestDetail(detail)
 				key := dedupKey(apiName, modelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
@@ -349,6 +434,10 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		}
 	}
 
+	s.mu.Unlock()
+	if result.Added > 0 {
+		s.schedulePersist()
+	}
 	return result
 }
 
@@ -377,7 +466,151 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.tokensByHour[hourKey] += totalTokens
 }
 
+func (s *RequestStatistics) restoreSnapshotLocked(snapshot StatisticsSnapshot) {
+	s.totalRequests = snapshot.TotalRequests
+	s.successCount = snapshot.SuccessCount
+	s.failureCount = snapshot.FailureCount
+	s.totalTokens = snapshot.TotalTokens
+
+	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
+	for apiName, apiSnapshot := range snapshot.APIs {
+		stats := &apiStats{
+			TotalRequests: apiSnapshot.TotalRequests,
+			TotalTokens:   apiSnapshot.TotalTokens,
+			Models:        make(map[string]*modelStats, len(apiSnapshot.Models)),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			stats.Models[modelName] = &modelStats{
+				TotalRequests: modelSnapshot.TotalRequests,
+				TotalTokens:   modelSnapshot.TotalTokens,
+				Details:       cloneRequestDetails(modelSnapshot.Details, s.maxDetailsPerModel),
+			}
+		}
+		s.apis[apiName] = stats
+	}
+
+	s.requestsByDay = cloneStringInt64Map(snapshot.RequestsByDay)
+	s.requestsByHour = make(map[int]int64, len(snapshot.RequestsByHour))
+	for hour, count := range snapshot.RequestsByHour {
+		if parsed, ok := parseHour(hour); ok {
+			s.requestsByHour[parsed] = count
+		}
+	}
+	s.tokensByDay = cloneStringInt64Map(snapshot.TokensByDay)
+	s.tokensByHour = make(map[int]int64, len(snapshot.TokensByHour))
+	for hour, count := range snapshot.TokensByHour {
+		if parsed, ok := parseHour(hour); ok {
+			s.tokensByHour[parsed] = count
+		}
+	}
+}
+
+func (s *RequestStatistics) schedulePersist() {
+	if s == nil {
+		return
+	}
+	s.persistMu.Lock()
+	if s.persistPath == "" {
+		s.persistMu.Unlock()
+		return
+	}
+	s.persistPending = true
+	if s.persistRunning {
+		s.persistMu.Unlock()
+		return
+	}
+	s.persistRunning = true
+	s.persistMu.Unlock()
+
+	go func() {
+		for {
+			time.Sleep(statisticsPersistenceWaitTime)
+
+			s.persistMu.Lock()
+			if !s.persistPending {
+				s.persistRunning = false
+				s.persistMu.Unlock()
+				return
+			}
+			s.persistPending = false
+			path := s.persistPath
+			s.persistMu.Unlock()
+
+			if path == "" {
+				continue
+			}
+			if err := writeStatisticsSnapshot(path, s.Snapshot()); err != nil {
+				log.Warnf("usage: persist statistics: %v", err)
+			}
+		}
+	}()
+}
+
+func writeStatisticsSnapshot(path string, snapshot StatisticsSnapshot) error {
+	payload := statisticsPersistencePayload{
+		Version: statisticsPersistenceVersion,
+		Usage:   snapshot,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal statistics snapshot: %w", err)
+	}
+	tempPath := path + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0o644); err != nil {
+		return fmt.Errorf("write temp statistics snapshot: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("rename statistics snapshot: %w", err)
+	}
+	return nil
+}
+
+func cloneRequestDetails(details []RequestDetail, limit int) []RequestDetail {
+	if len(details) == 0 {
+		return nil
+	}
+	if limit > 0 && len(details) > limit {
+		details = details[len(details)-limit:]
+	}
+	out := make([]RequestDetail, len(details))
+	copy(out, details)
+	for index := range out {
+		out[index] = normaliseRequestDetail(out[index])
+	}
+	return out
+}
+
+func cloneStringInt64Map(input map[string]int64) map[string]int64 {
+	out := make(map[string]int64, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func normaliseRequestDetail(detail RequestDetail) RequestDetail {
+	detail.Tokens = normaliseTokenStats(detail.Tokens)
+	if detail.LatencyMs < 0 {
+		detail.LatencyMs = 0
+	}
+	if detail.Timestamp.IsZero() {
+		detail.Timestamp = time.Now()
+	}
+	return detail
+}
+
+func newEventID(timestamp time.Time) string {
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	sequence := eventIDCounter.Add(1)
+	return fmt.Sprintf("evt_%d_%d", timestamp.UTC().UnixNano(), sequence)
+}
+
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
+	if eventID := strings.TrimSpace(detail.EventID); eventID != "" {
+		return eventID
+	}
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
@@ -476,8 +709,6 @@ func resolveSuccess(ctx context.Context) bool {
 	return status < httpStatusBadRequest
 }
 
-const httpStatusBadRequest = 400
-
 func normaliseDetail(detail coreusage.Detail) TokenStats {
 	tokens := TokenStats{
 		InputTokens:     detail.InputTokens,
@@ -518,4 +749,16 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func parseHour(value string) (int, bool) {
+	if len(value) != 2 {
+		return 0, false
+	}
+	var hour int
+	_, err := fmt.Sscanf(value, "%02d", &hour)
+	if err != nil || hour < 0 || hour > 23 {
+		return 0, false
+	}
+	return hour, true
 }
