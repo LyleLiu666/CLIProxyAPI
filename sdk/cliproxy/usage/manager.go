@@ -8,6 +8,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const (
+	defaultQueueBuffer = 256
+	dropLogInterval    = 5 * time.Second
+)
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider    string
@@ -41,24 +46,36 @@ type queueItem struct {
 	record Record
 }
 
-// Manager maintains a queue of usage records and delivers them to registered plugins.
+// Manager maintains a bounded queue of usage records and delivers them to registered plugins.
 type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+	mu          sync.Mutex
+	cond        *sync.Cond
+	buffer      int
+	queue       []queueItem
+	head        int
+	size        int
+	dropped     uint64
+	lastDropLog time.Time
+	closed      bool
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
 }
 
-// NewManager constructs a manager with a buffered queue.
+// NewManager constructs a manager with a bounded queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	if buffer <= 0 {
+		buffer = defaultQueueBuffer
+	}
+
+	m := &Manager{
+		buffer: buffer,
+		queue:  make([]queueItem, buffer),
+	}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -74,7 +91,11 @@ func (m *Manager) Start(ctx context.Context) {
 		}
 		var workerCtx context.Context
 		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
+		go func() {
+			<-workerCtx.Done()
+			m.close(false)
+		}()
+		go m.run()
 	})
 }
 
@@ -83,8 +104,15 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
+	m.close(true)
+}
+
+func (m *Manager) close(cancel bool) {
+	if m == nil {
+		return
+	}
 	m.stopOnce.Do(func() {
-		if m.cancel != nil {
+		if cancel && m.cancel != nil {
 			m.cancel()
 		}
 		m.mu.Lock()
@@ -104,37 +132,76 @@ func (m *Manager) Register(plugin Plugin) {
 	m.pluginsMu.Unlock()
 }
 
-// Publish enqueues a usage record for processing. If no plugin is registered
-// the record will be discarded downstream.
+// Publish enqueues a usage record for processing. If the queue is full the
+// record is dropped to keep ingress memory bounded.
 func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
+
+	shouldLogDrop := false
+	droppedCount := uint64(0)
+	buffer := 0
+	provider := ""
+
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	if m.size == m.buffer {
+		m.dropped++
+		droppedCount = m.dropped
+		buffer = m.buffer
+		provider = record.Provider
+		now := time.Now()
+		if m.lastDropLog.IsZero() || now.Sub(m.lastDropLog) >= dropLogInterval {
+			m.lastDropLog = now
+			shouldLogDrop = true
+		}
+		m.mu.Unlock()
+		if shouldLogDrop {
+			log.Warnf("usage: queue full (buffer=%d, dropped=%d), dropping record for provider %s", buffer, droppedCount, provider)
+		}
+		return
+	}
+
+	index := (m.head + m.size) % m.buffer
+	m.queue[index] = queueItem{ctx: ctx, record: record}
+	m.size++
 	m.mu.Unlock()
 	m.cond.Signal()
 }
 
-func (m *Manager) run(ctx context.Context) {
+// DroppedCount returns the number of records that were dropped because the queue was full.
+func (m *Manager) DroppedCount() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dropped
+}
+
+func (m *Manager) run() {
 	for {
 		m.mu.Lock()
-		for !m.closed && len(m.queue) == 0 {
+		for !m.closed && m.size == 0 {
 			m.cond.Wait()
 		}
-		if len(m.queue) == 0 && m.closed {
+		if m.size == 0 && m.closed {
 			m.mu.Unlock()
 			return
 		}
-		item := m.queue[0]
-		m.queue = m.queue[1:]
+
+		item := m.queue[m.head]
+		m.queue[m.head] = queueItem{}
+		m.head = (m.head + 1) % m.buffer
+		m.size--
 		m.mu.Unlock()
+
 		m.dispatch(item)
 	}
 }

@@ -69,9 +69,8 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			detail.TotalTokens = total
 		}
 	}
-	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 && !failed {
-		return
-	}
+	// Successful requests with zero token usage still need a usage record so
+	// request counts remain accurate when upstream explicitly reports zero usage.
 	r.once.Do(func() {
 		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
 	})
