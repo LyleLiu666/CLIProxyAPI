@@ -1,9 +1,12 @@
 package executor
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -61,4 +64,45 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
 	}
+}
+
+func TestUsageReporterPublishZeroTokenSuccessStillPublishesRecord(t *testing.T) {
+	wasEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(wasEnabled)
+
+	apiKey := fmt.Sprintf("zero-token-api-%d", time.Now().UnixNano())
+	model := fmt.Sprintf("zero-token-model-%d", time.Now().UnixNano())
+	reporter := &usageReporter{
+		provider:    "openai",
+		model:       model,
+		apiKey:      apiKey,
+		requestedAt: time.Now(),
+	}
+
+	reporter.publish(context.Background(), usage.Detail{})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := internalusage.GetRequestStatistics().Snapshot()
+		apiStats, ok := snapshot.APIs[apiKey]
+		if ok {
+			modelStats, ok := apiStats.Models[model]
+			if ok && modelStats.TotalRequests == 1 {
+				if modelStats.TotalTokens != 0 {
+					t.Fatalf("total tokens = %d, want 0", modelStats.TotalTokens)
+				}
+				if len(modelStats.Details) != 1 {
+					t.Fatalf("details len = %d, want 1", len(modelStats.Details))
+				}
+				if modelStats.Details[0].Failed {
+					t.Fatal("expected successful zero-token request to remain successful")
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("expected zero-token successful request to be recorded")
 }

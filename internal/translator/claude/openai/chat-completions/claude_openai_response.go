@@ -286,6 +286,9 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		}
 		chunks = append(chunks, bytes.TrimSpace(line[5:]))
 	}
+	if len(chunks) == 0 && gjson.ValidBytes(rawJSON) {
+		return convertClaudePlainNonStreamPayloadToOpenAI(rawJSON)
+	}
 
 	// Base OpenAI non-streaming response template
 	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
@@ -434,5 +437,107 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
 	}
 
+	return out
+}
+
+func convertClaudePlainNonStreamPayloadToOpenAI(rawJSON []byte) []byte {
+	root := gjson.ParseBytes(rawJSON)
+	if root.Get("type").String() == "message" {
+		return convertClaudePlainMessageToOpenAINonStream(rawJSON)
+	}
+	if root.Get("type").String() == "error" || root.Get("error").Exists() {
+		return convertClaudePlainErrorToOpenAI(rawJSON)
+	}
+	return convertClaudeUnexpectedPayloadToOpenAIError(rawJSON)
+}
+
+func convertClaudePlainMessageToOpenAINonStream(rawJSON []byte) []byte {
+	root := gjson.ParseBytes(rawJSON)
+	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
+
+	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
+	out, _ = sjson.SetBytes(out, "created", time.Now().Unix())
+	out, _ = sjson.SetBytes(out, "model", root.Get("model").String())
+
+	var contentParts []string
+	var reasoningParts []string
+	toolCallsCount := 0
+	content := root.Get("content")
+	if content.IsArray() {
+		content.ForEach(func(_, block gjson.Result) bool {
+			switch block.Get("type").String() {
+			case "text":
+				contentParts = append(contentParts, block.Get("text").String())
+			case "thinking":
+				reasoningParts = append(reasoningParts, block.Get("thinking").String())
+			case "tool_use":
+				idPath := fmt.Sprintf("choices.0.message.tool_calls.%d.id", toolCallsCount)
+				typePath := fmt.Sprintf("choices.0.message.tool_calls.%d.type", toolCallsCount)
+				namePath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.name", toolCallsCount)
+				argumentsPath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.arguments", toolCallsCount)
+				out, _ = sjson.SetBytes(out, idPath, block.Get("id").String())
+				out, _ = sjson.SetBytes(out, typePath, "function")
+				out, _ = sjson.SetBytes(out, namePath, block.Get("name").String())
+				input := block.Get("input")
+				if input.Exists() {
+					out, _ = sjson.SetBytes(out, argumentsPath, input.Raw)
+				} else {
+					out, _ = sjson.SetBytes(out, argumentsPath, "{}")
+				}
+				toolCallsCount++
+			}
+			return true
+		})
+	}
+
+	out, _ = sjson.SetBytes(out, "choices.0.message.content", strings.Join(contentParts, ""))
+	if len(reasoningParts) > 0 {
+		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning", strings.Join(reasoningParts, ""))
+	}
+	if toolCallsCount > 0 {
+		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
+	} else {
+		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(root.Get("stop_reason").String()))
+	}
+	if usage := root.Get("usage"); usage.Exists() {
+		promptTokens, completionTokens, totalTokens, cachedTokens := calculateClaudeUsageTokens(usage)
+		out, _ = sjson.SetBytes(out, "usage.prompt_tokens", promptTokens)
+		out, _ = sjson.SetBytes(out, "usage.completion_tokens", completionTokens)
+		out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
+		out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
+	}
+
+	return out
+}
+
+func convertClaudePlainErrorToOpenAI(rawJSON []byte) []byte {
+	root := gjson.ParseBytes(rawJSON)
+	errorNode := root.Get("error")
+	if !errorNode.Exists() {
+		errorNode = root
+	}
+	message := strings.TrimSpace(errorNode.Get("message").String())
+	if message == "" {
+		message = "unexpected Claude error response"
+	}
+	typ := strings.TrimSpace(errorNode.Get("type").String())
+	if typ == "" {
+		typ = "upstream_error"
+	}
+	out := []byte(`{"error":{"message":"","type":""}}`)
+	out, _ = sjson.SetBytes(out, "error.message", message)
+	out, _ = sjson.SetBytes(out, "error.type", typ)
+	return out
+}
+
+func convertClaudeUnexpectedPayloadToOpenAIError(rawJSON []byte) []byte {
+	root := gjson.ParseBytes(rawJSON)
+	typ := strings.TrimSpace(root.Get("type").String())
+	message := "unexpected Claude non-stream payload"
+	if typ != "" {
+		message = fmt.Sprintf("unexpected Claude non-stream payload type %q", typ)
+	}
+	out := []byte(`{"error":{"message":"","type":"upstream_protocol_error"}}`)
+	out, _ = sjson.SetBytes(out, "error.message", message)
 	return out
 }
