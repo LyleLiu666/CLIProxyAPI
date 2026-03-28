@@ -57,6 +57,69 @@ func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresZeroPlaceholderUsage(t *testing.T) {
+	line := []byte(`data: {"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
+	if detail, ok := parseOpenAIStreamUsage(line); ok {
+		t.Fatalf("expected zero placeholder usage to be ignored, got ok=%t detail=%+v", ok, detail)
+	}
+}
+
+func TestUsageReporterStreamIgnoresZeroPlaceholderUntilFinalUsage(t *testing.T) {
+	wasEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(wasEnabled)
+
+	apiKey := fmt.Sprintf("stream-zero-usage-api-%d", time.Now().UnixNano())
+	model := fmt.Sprintf("stream-zero-usage-model-%d", time.Now().UnixNano())
+	reporter := &usageReporter{
+		provider:    "qwen",
+		model:       model,
+		apiKey:      apiKey,
+		requestedAt: time.Now(),
+	}
+
+	lines := [][]byte{
+		[]byte(`data: {"id":"chatcmpl-zero","choices":[{"delta":{"content":"o"},"index":0}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`),
+		[]byte(`data: {"id":"chatcmpl-final","choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"input_tokens":320,"output_tokens":1}}`),
+	}
+
+	for _, line := range lines {
+		if detail, ok := parseOpenAIStreamUsage(line); ok {
+			reporter.publish(context.Background(), detail)
+		}
+	}
+
+	reporter.ensurePublished(context.Background())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := internalusage.GetRequestStatistics().Snapshot()
+		apiStats, ok := snapshot.APIs[apiKey]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		modelStats, ok := apiStats.Models[model]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if modelStats.TotalRequests != 1 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if modelStats.TotalTokens != 321 {
+			t.Fatalf("total tokens = %d, want 321", modelStats.TotalTokens)
+		}
+		if modelStats.Details[0].Tokens.TotalTokens != 321 {
+			t.Fatalf("detail total tokens = %d, want 321", modelStats.Details[0].Tokens.TotalTokens)
+		}
+		return
+	}
+
+	t.Fatal("expected final stream usage to override placeholder usage")
+}
+
 func TestParseOpenAIStreamUsageSupportsResponsesFields(t *testing.T) {
 	line := []byte(`data: {"usage":{"input_tokens":320,"output_tokens":1,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":5}}}`)
 	detail, ok := parseOpenAIStreamUsage(line)
