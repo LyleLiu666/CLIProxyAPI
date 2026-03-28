@@ -165,10 +165,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	detail := normaliseDetail(record.Detail)
 	totalTokens := detail.TotalTokens
-	statsKey := record.APIKey
-	if statsKey == "" {
-		statsKey = resolveAPIIdentifier(ctx, record)
-	}
+	statsKey := resolveBucketKey(ctx, record)
 	failed := record.Failed
 	if !failed {
 		failed = !resolveSuccess(ctx)
@@ -422,6 +419,46 @@ func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 		return record.Provider
 	}
 	return "unknown"
+}
+
+func resolveBucketKey(ctx context.Context, record coreusage.Record) string {
+	base := strings.TrimSpace(record.APIKey)
+	if base == "" {
+		base = resolveAPIIdentifier(ctx, record)
+	}
+	route := resolveRequestRoute(ctx)
+	if route == "" {
+		return base
+	}
+	if base == "" {
+		return route
+	}
+	return base + " @ " + route
+}
+
+func resolveRequestRoute(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	path := strings.TrimSpace(ginCtx.FullPath())
+	if path == "" && ginCtx.Request != nil && ginCtx.Request.URL != nil {
+		path = strings.TrimSpace(ginCtx.Request.URL.Path)
+	}
+	if path == "" {
+		return ""
+	}
+	method := ""
+	if ginCtx.Request != nil {
+		method = strings.TrimSpace(ginCtx.Request.Method)
+	}
+	if method == "" {
+		return path
+	}
+	return method + " " + path
 }
 
 func resolveSuccess(ctx context.Context) bool {
