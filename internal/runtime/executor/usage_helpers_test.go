@@ -50,6 +50,90 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte(`data: {"id":"chatcmpl-null","choices":[{"delta":{"content":"ok"},"index":0}],"usage":null}`)
+	if detail, ok := parseOpenAIStreamUsage(line); ok {
+		t.Fatalf("expected null usage to be ignored, got ok=%t detail=%+v", ok, detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageSupportsResponsesFields(t *testing.T) {
+	line := []byte(`data: {"usage":{"input_tokens":320,"output_tokens":1,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":5}}}`)
+	detail, ok := parseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("expected responses-style stream usage to be parsed")
+	}
+	if detail.InputTokens != 320 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 320)
+	}
+	if detail.OutputTokens != 1 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 1)
+	}
+	if detail.CachedTokens != 2 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 2)
+	}
+	if detail.ReasoningTokens != 5 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
+	}
+}
+
+func TestUsageReporterStreamIgnoresNullUsageUntilFinalUsage(t *testing.T) {
+	wasEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(wasEnabled)
+
+	apiKey := fmt.Sprintf("stream-null-usage-api-%d", time.Now().UnixNano())
+	model := fmt.Sprintf("stream-null-usage-model-%d", time.Now().UnixNano())
+	reporter := &usageReporter{
+		provider:    "qwen",
+		model:       model,
+		apiKey:      apiKey,
+		requestedAt: time.Now(),
+	}
+
+	lines := [][]byte{
+		[]byte(`data: {"id":"chatcmpl-null","choices":[{"delta":{"content":"o"},"index":0}],"usage":null}`),
+		[]byte(`data: {"id":"chatcmpl-final","choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":13,"completion_tokens":1,"total_tokens":14}}`),
+	}
+
+	for _, line := range lines {
+		if detail, ok := parseOpenAIStreamUsage(line); ok {
+			reporter.publish(context.Background(), detail)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := internalusage.GetRequestStatistics().Snapshot()
+		apiStats, ok := snapshot.APIs[apiKey]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		modelStats, ok := apiStats.Models[model]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if modelStats.TotalRequests != 1 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if modelStats.TotalTokens != 14 {
+			t.Fatalf("total tokens = %d, want 14", modelStats.TotalTokens)
+		}
+		if len(modelStats.Details) != 1 {
+			t.Fatalf("details len = %d, want 1", len(modelStats.Details))
+		}
+		if modelStats.Details[0].Tokens.TotalTokens != 14 {
+			t.Fatalf("detail total tokens = %d, want 14", modelStats.Details[0].Tokens.TotalTokens)
+		}
+		return
+	}
+
+	t.Fatal("expected final stream usage to be recorded")
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &usageReporter{
 		provider:    "openai",
