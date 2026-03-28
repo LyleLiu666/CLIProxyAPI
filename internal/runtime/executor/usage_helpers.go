@@ -278,6 +278,9 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}
+	if detail.TotalTokens == 0 && detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 {
+		return usage.Detail{}, false
+	}
 	return detail, true
 }
 
