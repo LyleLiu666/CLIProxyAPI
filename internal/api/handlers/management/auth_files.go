@@ -250,6 +250,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
+			h.enrichAuthFileEntry(c.Request.Context(), auth, entry)
 			files = append(files, entry)
 		}
 	}
@@ -408,6 +409,15 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["modtime"] = auth.UpdatedAt
 		entry["updated_at"] = auth.UpdatedAt
 	}
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+		entry["prefix"] = prefix
+	}
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		entry["proxy_url"] = proxyURL
+	}
+	if priority, ok := authPriorityValue(auth); ok {
+		entry["priority"] = priority
+	}
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
@@ -532,6 +542,64 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 		return ""
 	}
 	return auth.Attributes[key]
+}
+
+func authPriorityValue(auth *coreauth.Auth) (int, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if auth.Attributes != nil {
+		if priority, ok := parsePriorityString(auth.Attributes["priority"]); ok && priority != 0 {
+			return priority, true
+		}
+	}
+	if auth.Metadata != nil {
+		if priority, ok := parsePriorityAny(auth.Metadata["priority"]); ok && priority != 0 {
+			return priority, true
+		}
+	}
+	return 0, false
+}
+
+func parsePriorityString(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	priority, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return priority, true
+}
+
+func parsePriorityAny(raw any) (int, bool) {
+	switch v := raw.(type) {
+	case int:
+		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case json.Number:
+		priority, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(priority), true
+	case string:
+		return parsePriorityString(v)
+	default:
+		return 0, false
+	}
 }
 
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
@@ -1168,7 +1236,6 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		if targetAuth.Attributes == nil {
 			targetAuth.Attributes = make(map[string]string)
 		}
-
 		if req.Priority != nil {
 			if *req.Priority == 0 {
 				delete(targetAuth.Metadata, "priority")
