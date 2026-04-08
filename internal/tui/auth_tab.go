@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -307,8 +308,140 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		sb.WriteString("\n")
 	}
 
+	if usage := getNestedMap(f, "codex_usage"); len(usage) > 0 {
+		planType := getString(usage, "plan_type")
+		if planType == "" {
+			if idToken := getNestedMap(f, "id_token"); len(idToken) > 0 {
+				planType = getString(idToken, "plan_type")
+			}
+		}
+		if planType != "" {
+			sb.WriteString(renderDetailLine(labelStyle, valueStyle, "Codex Plan", planType))
+		}
+
+		if credits := getNestedMap(usage, "credits"); len(credits) > 0 {
+			if creditText := formatCodexCredits(credits); creditText != "" {
+				sb.WriteString(renderDetailLine(labelStyle, valueStyle, "Credits", creditText))
+			}
+		}
+
+		if rateLimit := getNestedMap(usage, "rate_limit"); len(rateLimit) > 0 {
+			if primary := getNestedMap(rateLimit, "primary_window"); len(primary) > 0 {
+				sb.WriteString(renderDetailLine(labelStyle, valueStyle, "Primary", formatCodexWindow(primary)))
+			}
+			if secondary := getNestedMap(rateLimit, "secondary_window"); len(secondary) > 0 {
+				sb.WriteString(renderDetailLine(labelStyle, valueStyle, "Secondary", formatCodexWindow(secondary)))
+			}
+		}
+
+		for _, item := range getNestedSlice(usage, "additional_rate_limits") {
+			limitName := getString(item, "limit_name")
+			if limitName == "" {
+				limitName = getString(item, "metered_feature")
+			}
+			if limitName == "" {
+				continue
+			}
+			rateLimit := getNestedMap(item, "rate_limit")
+			if len(rateLimit) == 0 {
+				continue
+			}
+			primary := getNestedMap(rateLimit, "primary_window")
+			if len(primary) > 0 {
+				sb.WriteString(renderDetailLine(labelStyle, valueStyle, limitName, formatCodexWindow(primary)))
+			}
+		}
+	} else if idToken := getNestedMap(f, "id_token"); len(idToken) > 0 {
+		if planType := getString(idToken, "plan_type"); planType != "" {
+			sb.WriteString(renderDetailLine(labelStyle, valueStyle, "Codex Plan", planType))
+		}
+	}
+
+	if usageErr := getAnyString(f, "codex_usage_error"); usageErr != "" {
+		sb.WriteString(renderDetailLine(labelStyle, valueStyle, "Usage Err", usageErr))
+	}
+
 	sb.WriteString("    └─────────────────────────────────────────────\n")
 	return sb.String()
+}
+
+func renderDetailLine(labelStyle, valueStyle lipgloss.Style, label, value string) string {
+	return fmt.Sprintf("    │ %s %s\n",
+		labelStyle.Render(fmt.Sprintf("%-12s:", label)),
+		valueStyle.Render(value))
+}
+
+func getNestedMap(m map[string]any, key string) map[string]any {
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	if typed, ok := raw.(map[string]any); ok {
+		return typed
+	}
+	return nil
+}
+
+func getNestedSlice(m map[string]any, key string) []map[string]any {
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if typed, ok := item.(map[string]any); ok {
+			out = append(out, typed)
+		}
+	}
+	return out
+}
+
+func formatCodexCredits(credits map[string]any) string {
+	if getBool(credits, "unlimited") {
+		return "Unlimited"
+	}
+	if !getBool(credits, "has_credits") {
+		return ""
+	}
+	return getAnyString(credits, "balance")
+}
+
+func formatCodexWindow(window map[string]any) string {
+	if len(window) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if used := getFloat(window, "used_percent"); used > 0 {
+		left := 100 - used
+		if left < 0 {
+			left = 0
+		}
+		parts = append(parts, fmt.Sprintf("%.0f%% left", left))
+	}
+	if seconds := getFloat(window, "limit_window_seconds"); seconds > 0 {
+		parts = append(parts, formatWindowSeconds(int64(seconds)))
+	}
+	if resetAt := getFloat(window, "reset_at"); resetAt > 0 {
+		parts = append(parts, "reset "+time.Unix(int64(resetAt), 0).Local().Format("2006-01-02 15:04:05"))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatWindowSeconds(seconds int64) string {
+	if seconds <= 0 {
+		return ""
+	}
+	if seconds%3600 == 0 {
+		return fmt.Sprintf("%dh", seconds/3600)
+	}
+	if seconds%60 == 0 {
+		return fmt.Sprintf("%dm", seconds/60)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 // getAnyString converts any value to its string representation.

@@ -254,6 +254,10 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "codex" {
+		token, errToken := h.refreshCodexOAuthAccessToken(ctx, auth)
+		return token, errToken
+	}
 	if provider == "gemini-cli" {
 		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, auth)
 		return token, errToken
@@ -264,6 +268,65 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	if auth.Metadata == nil {
+		return "", fmt.Errorf("codex oauth metadata missing")
+	}
+
+	current := strings.TrimSpace(codexAccessTokenForAuth(auth))
+	if current != "" && !codexTokenNeedsRefresh(auth.Metadata) {
+		return current, nil
+	}
+
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if strings.TrimSpace(refreshToken) == "" {
+		if current != "" {
+			return current, nil
+		}
+		return "", fmt.Errorf("codex refresh token missing")
+	}
+
+	refresher := newCodexAuthRefresher(h.cfg)
+	tokenData, err := refresher.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	if err != nil {
+		return "", err
+	}
+	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
+		return "", fmt.Errorf("codex token refresh returned empty access token")
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now()
+	auth.Metadata["id_token"] = tokenData.IDToken
+	auth.Metadata["access_token"] = tokenData.AccessToken
+	if strings.TrimSpace(tokenData.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = tokenData.RefreshToken
+	}
+	if strings.TrimSpace(tokenData.AccountID) != "" {
+		auth.Metadata["account_id"] = tokenData.AccountID
+	}
+	auth.Metadata["email"] = tokenData.Email
+	auth.Metadata["expired"] = tokenData.Expire
+	auth.Metadata["type"] = "codex"
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
+
+	if h != nil && h.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+
+	return strings.TrimSpace(tokenData.AccessToken), nil
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
