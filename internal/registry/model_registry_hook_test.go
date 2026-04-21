@@ -11,6 +11,7 @@ func newTestModelRegistry() *ModelRegistry {
 	return &ModelRegistry{
 		models:           make(map[string]*ModelRegistration),
 		clientModels:     make(map[string][]string),
+		clientModelSets:  make(map[string]map[string]struct{}),
 		clientModelInfos: make(map[string]map[string]*ModelInfo),
 		clientProviders:  make(map[string]string),
 		mutex:            &sync.RWMutex{},
@@ -200,5 +201,35 @@ func TestModelRegistryHook_PanicDoesNotAffectRegistry(t *testing.T) {
 	case <-hook.unregisteredCalled:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for OnModelsUnregistered hook call")
+	}
+}
+
+func TestModelRegistryClientSupportsModelTracksReRegistration(t *testing.T) {
+	r := newTestModelRegistry()
+
+	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{
+		{ID: "m1"},
+		{ID: "m2"},
+	})
+	if !r.ClientSupportsModel("client-1", "m1") {
+		t.Fatal("expected initial model m1 to be supported")
+	}
+	if !r.ClientSupportsModel("client-1", " M2 ") {
+		t.Fatal("expected lookup to ignore case and whitespace")
+	}
+
+	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{
+		{ID: "m3"},
+	})
+	if r.ClientSupportsModel("client-1", "m1") {
+		t.Fatal("expected stale model m1 to be removed after re-registration")
+	}
+	if !r.ClientSupportsModel("client-1", "m3") {
+		t.Fatal("expected new model m3 to be supported after re-registration")
+	}
+
+	r.UnregisterClient("client-1")
+	if r.ClientSupportsModel("client-1", "m3") {
+		t.Fatal("expected model support cache to be cleared after unregister")
 	}
 }
