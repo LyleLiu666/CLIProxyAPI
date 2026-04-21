@@ -517,6 +517,47 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	return result
 }
 
+func buildCodexAuthRecord(authSvc *codex.CodexAuth, bundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+	if authSvc == nil {
+		return nil, fmt.Errorf("codex auth service is nil")
+	}
+	if bundle == nil {
+		return nil, fmt.Errorf("codex auth bundle is nil")
+	}
+
+	tokenStorage := authSvc.CreateTokenStorage(bundle)
+	if tokenStorage == nil || strings.TrimSpace(tokenStorage.Email) == "" {
+		return nil, fmt.Errorf("codex token storage missing account information")
+	}
+
+	claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
+	planType := ""
+	hashAccountID := ""
+	if claims != nil {
+		planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		if accountID := claims.GetAccountID(); accountID != "" {
+			digest := sha256.Sum256([]byte(accountID))
+			hashAccountID = hex.EncodeToString(digest[:])[:8]
+		}
+	}
+
+	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+	return &coreauth.Auth{
+		ID:       fileName,
+		Provider: "codex",
+		FileName: fileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email":      tokenStorage.Email,
+			"account_id": tokenStorage.AccountID,
+			"plan_type":  planType,
+		},
+		Attributes: map[string]string{
+			"plan_type": planType,
+		},
+	}, nil
+}
+
 func authEmail(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -1853,30 +1894,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			return
 		}
 
-		// Extract additional info for filename generation
-		claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
-		planType := ""
-		hashAccountID := ""
-		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			if accountID := claims.GetAccountID(); accountID != "" {
-				digest := sha256.Sum256([]byte(accountID))
-				hashAccountID = hex.EncodeToString(digest[:])[:8]
-			}
-		}
-
-		// Create token storage and persist
-		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
-		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "codex",
-			FileName: fileName,
-			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
+		record, errRecord := buildCodexAuthRecord(openaiAuth, bundle)
+		if errRecord != nil {
+			SetOAuthSessionError(state, "Failed to build authentication record")
+			log.Errorf("Failed to build authentication record: %v", errRecord)
+			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
