@@ -195,6 +195,157 @@ func TestListAuthFiles_IncludesCodexUsage(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_SkipsCodexUsageWhenTokenNeedsRefresh(t *testing.T) {
+	originalFactory := newCodexAuthRefresher
+	t.Cleanup(func() { newCodexAuthRefresher = originalFactory })
+	newCodexAuthRefresher = func(cfg *config.Config) codexAuthRefresher {
+		_ = cfg
+		return stubCodexAuthRefresher{err: errors.New("should not refresh for auth-files")}
+	}
+
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"plan_type": "pro"})
+	}))
+	defer srv.Close()
+
+	authDir := t.TempDir()
+	fileName := "codex-expired.json"
+	filePath := filepath.Join(authDir, fileName)
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":     filePath,
+			"base_url": srv.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token":  "expired-access-token",
+			"refresh_token": "refresh-token",
+			"expired":       time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), record); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if requestCount != 0 {
+		t.Fatalf("expected no usage requests, got %d", requestCount)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	filesRaw, ok := payload["files"].([]any)
+	if !ok || len(filesRaw) != 1 {
+		t.Fatalf("expected 1 auth file entry, got %#v", payload["files"])
+	}
+	entry, ok := filesRaw[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected auth entry object, got %#v", filesRaw[0])
+	}
+	if _, hasUsage := entry["codex_usage"]; hasUsage {
+		t.Fatalf("expected no codex_usage, got %#v", entry["codex_usage"])
+	}
+	if _, hasErr := entry["codex_usage_error"]; hasErr {
+		t.Fatalf("expected no codex_usage_error, got %#v", entry["codex_usage_error"])
+	}
+}
+
+func TestListAuthFiles_SkipsCodexUsageForDisabledAuth(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"plan_type": "pro"})
+	}))
+	defer srv.Close()
+
+	authDir := t.TempDir()
+	fileName := "codex-disabled.json"
+	filePath := filepath.Join(authDir, fileName)
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusDisabled,
+		Disabled: true,
+		Attributes: map[string]string{
+			"path":     filePath,
+			"base_url": srv.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token": "active-access-token",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), record); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if requestCount != 0 {
+		t.Fatalf("expected no usage requests, got %d", requestCount)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	filesRaw, ok := payload["files"].([]any)
+	if !ok || len(filesRaw) != 1 {
+		t.Fatalf("expected 1 auth file entry, got %#v", payload["files"])
+	}
+	entry, ok := filesRaw[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected auth entry object, got %#v", filesRaw[0])
+	}
+	if _, hasUsage := entry["codex_usage"]; hasUsage {
+		t.Fatalf("expected no codex_usage, got %#v", entry["codex_usage"])
+	}
+	if _, hasErr := entry["codex_usage_error"]; hasErr {
+		t.Fatalf("expected no codex_usage_error, got %#v", entry["codex_usage_error"])
+	}
+}
+
 func TestResolveTokenForAuth_RefreshesExpiredCodexAccessToken(t *testing.T) {
 	originalFactory := newCodexAuthRefresher
 	t.Cleanup(func() { newCodexAuthRefresher = originalFactory })
