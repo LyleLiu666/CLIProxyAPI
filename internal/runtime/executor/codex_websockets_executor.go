@@ -313,6 +313,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 	markCodexWebsocketCreateSent(sess, conn, wsReqBody)
+	var transcript bytes.Buffer
 
 	for {
 		if ctx != nil && ctx.Err() != nil {
@@ -340,6 +341,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			continue
 		}
 		appendAPIResponseChunk(ctx, e.cfg, payload)
+		transcript.Write(payload)
+		transcript.WriteByte('\n')
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if sess != nil {
@@ -356,7 +359,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				reporter.publish(ctx, detail)
 			}
 			var param any
-			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, transcript.Bytes(), &param)
 			resp = cliproxyexecutor.Response{Payload: []byte(out)}
 			return resp, nil
 		}
