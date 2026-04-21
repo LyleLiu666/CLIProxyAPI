@@ -75,6 +75,11 @@ func (m authTabModel) fetchFiles() tea.Msg {
 	return authFilesMsg{files: files, err: err}
 }
 
+func (m authTabModel) fetchFilesWithCodexUsage() tea.Msg {
+	files, err := m.client.GetAuthFilesWithCodexUsage()
+	return authFilesMsg{files: files, err: err}
+}
+
 func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
@@ -581,6 +586,9 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 	case "r":
 		m.status = ""
 		return m, m.fetchFiles
+	case "u", "U":
+		m.status = ""
+		return m, m.fetchFilesWithCodexUsage
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)

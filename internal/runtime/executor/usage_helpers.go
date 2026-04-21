@@ -69,21 +69,10 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			detail.TotalTokens = total
 		}
 	}
-	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 && !failed {
-		return
-	}
+	// Successful requests with zero token usage still need a usage record so
+	// request counts remain accurate when upstream explicitly reports zero usage.
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      failed,
-			Detail:      detail,
-		})
+		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
 	})
 }
 
@@ -96,18 +85,37 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      false,
-			Detail:      usage.Detail{},
-		})
+		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
 	})
+}
+
+func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+	if r == nil {
+		return usage.Record{Detail: detail, Failed: failed}
+	}
+	return usage.Record{
+		Provider:    r.provider,
+		Model:       r.model,
+		Source:      r.source,
+		APIKey:      r.apiKey,
+		AuthID:      r.authID,
+		AuthIndex:   r.authIndex,
+		RequestedAt: r.requestedAt,
+		Latency:     r.latency(),
+		Failed:      failed,
+		Detail:      detail,
+	}
+}
+
+func (r *usageReporter) latency() time.Duration {
+	if r == nil || r.requestedAt.IsZero() {
+		return 0
+	}
+	latency := time.Since(r.requestedAt)
+	if latency < 0 {
+		return 0
+	}
+	return latency
 }
 
 func apiKeyFromContext(ctx context.Context) string {
@@ -235,19 +243,43 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
+	if !usageNode.Exists() || usageNode.Type == gjson.Null {
 		return usage.Detail{}, false
 	}
+
+	inputNode := usageNode.Get("prompt_tokens")
+	if !inputNode.Exists() {
+		inputNode = usageNode.Get("input_tokens")
+	}
+	outputNode := usageNode.Get("completion_tokens")
+	if !outputNode.Exists() {
+		outputNode = usageNode.Get("output_tokens")
+	}
+	cachedNode := usageNode.Get("prompt_tokens_details.cached_tokens")
+	if !cachedNode.Exists() {
+		cachedNode = usageNode.Get("input_tokens_details.cached_tokens")
+	}
+	reasoningNode := usageNode.Get("completion_tokens_details.reasoning_tokens")
+	if !reasoningNode.Exists() {
+		reasoningNode = usageNode.Get("output_tokens_details.reasoning_tokens")
+	}
+	totalNode := usageNode.Get("total_tokens")
+	if !inputNode.Exists() && !outputNode.Exists() && !cachedNode.Exists() && !reasoningNode.Exists() && !totalNode.Exists() {
+		return usage.Detail{}, false
+	}
+
 	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+		InputTokens:     inputNode.Int(),
+		OutputTokens:    outputNode.Int(),
+		ReasoningTokens: reasoningNode.Int(),
+		CachedTokens:    cachedNode.Int(),
+		TotalTokens:     totalNode.Int(),
 	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
+	if detail.TotalTokens == 0 && detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 {
+		return usage.Detail{}, false
 	}
 	return detail, true
 }

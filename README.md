@@ -1,6 +1,6 @@
 # CLI Proxy API
 
-English | [中文](README_CN.md)
+English | [中文](README_CN.md) | [日本語](README_JA.md)
 
 A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
 
@@ -10,7 +10,7 @@ So you can use local or multi-account CLI access with OpenAI(include Responses)/
 
 ## Sponsor
 
-[![z.ai](https://assets.router-for.me/english-5.png)](https://z.ai/subscribe?ic=8JVLJQFSKB)
+[![z.ai](https://assets.router-for.me/english-5-0.jpg)](https://z.ai/subscribe?ic=8JVLJQFSKB)
 
 This project is sponsored by Z.ai, supporting us with their GLM CODING PLAN.
 
@@ -29,6 +29,10 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 <tr>
 <td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
 <td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CLIProxyAPI users: register via <a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
+</tr>
+<tr>
+<td width="180"><a href="https://shop.bmoplus.com/?utm_source=github"><img src="./assets/bmoplus.png" alt="BmoPlus" width="150"></a></td>
+<td>Huge thanks to BmoPlus for sponsoring this project! BmoPlus is a highly reliable AI account provider built strictly for heavy AI users and developers. They offer rock-solid, ready-to-use accounts and official top-up services for ChatGPT Plus / ChatGPT Pro (Full Warranty) / Claude Pro / Super Grok / Gemini Pro. By registering and ordering through <a href="https://shop.bmoplus.com/?utm_source=github">BmoPlus - Premium AI Accounts & Top-ups</a>, users can unlock the mind-blowing rate of <b>10% of the official GPT subscription price (90% OFF)</b>!</td>
 </tr>
 </tbody>
 </table>
@@ -149,6 +153,17 @@ A Windows tray application implemented using PowerShell scripts, without relying
 ### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
 
 A modern web-based management dashboard for CLIProxyAPI built with Next.js, React, and PostgreSQL. Features real-time log streaming, structured configuration editing, API key management, OAuth provider integration for Claude/Gemini/Codex, usage analytics, container management, and config sync with OpenCode via companion plugin - no manual YAML editing needed.
+
+### [All API Hub](https://github.com/qixing-jk/all-api-hub)
+
+Browser extension for one-stop management of New API-compatible relay site accounts, featuring balance and usage dashboards, auto check-in, one-click key export to common apps, in-page API availability testing, and channel/model sync and redirection. It integrates with CLIProxyAPI through the Management API for one-click provider import and config sync.
+
+### [Shadow AI](https://github.com/HEUDavid/shadow-ai)
+
+Shadow AI is an AI assistant tool designed specifically for restricted environments. It provides a stealthy operation
+mode without windows or traces, and enables cross-device AI Q&A interaction and control via the local area network (
+LAN). Essentially, it is an automated collaboration layer of "screen/audio capture + AI inference + low-friction delivery",
+helping users to immersively use AI assistants across applications on controlled devices or in restricted environments.
 
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.

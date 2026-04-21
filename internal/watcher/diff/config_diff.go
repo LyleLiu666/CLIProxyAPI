@@ -256,6 +256,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RemoteManagement.DisableControlPanel != newCfg.RemoteManagement.DisableControlPanel {
 		changes = append(changes, fmt.Sprintf("remote-management.disable-control-panel: %t -> %t", oldCfg.RemoteManagement.DisableControlPanel, newCfg.RemoteManagement.DisableControlPanel))
 	}
+	if oldCfg.RemoteManagement.DisableAutoUpdatePanel != newCfg.RemoteManagement.DisableAutoUpdatePanel {
+		changes = append(changes, fmt.Sprintf("remote-management.disable-auto-update-panel: %t -> %t", oldCfg.RemoteManagement.DisableAutoUpdatePanel, newCfg.RemoteManagement.DisableAutoUpdatePanel))
+	}
 	oldPanelRepo := strings.TrimSpace(oldCfg.RemoteManagement.PanelGitHubRepository)
 	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
 	if oldPanelRepo != newPanelRepo {
@@ -303,6 +306,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			newModels := SummarizeVertexModels(n.Models)
 			if oldModels.hash != newModels.hash {
 				changes = append(changes, fmt.Sprintf("vertex[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("vertex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].headers: updated", i))

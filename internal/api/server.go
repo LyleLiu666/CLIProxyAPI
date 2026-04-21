@@ -263,6 +263,20 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	if stats := usage.GetRequestStatistics(); stats != nil {
+		persistDir := ""
+		if strings.TrimSpace(configFilePath) != "" {
+			persistDir = filepath.Dir(configFilePath)
+		} else if strings.TrimSpace(cfg.AuthDir) != "" {
+			persistDir = cfg.AuthDir
+		}
+		if persistDir != "" {
+			persistPath := filepath.Join(persistDir, "usage-statistics.json")
+			if err := stats.ConfigurePersistence(persistPath); err != nil {
+				log.Warnf("failed to configure usage statistics persistence at %s: %v", persistPath, err)
+			}
+		}
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}

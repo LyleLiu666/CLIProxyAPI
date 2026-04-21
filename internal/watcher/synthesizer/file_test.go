@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -408,6 +409,55 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexPlanTypeFromIDToken(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":     "codex",
+		"email":    "codex@example.com",
+		"id_token": fakeCodexIDTokenForSynthTest(t, "team"),
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Attributes["plan_type"] != "team" {
+		t.Fatalf("expected plan_type %q, got %q", "team", auths[0].Attributes["plan_type"])
+	}
+}
+
+func fakeCodexIDTokenForSynthTest(t *testing.T, planType string) string {
+	t.Helper()
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payloadRaw, err := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type":  planType,
+			"chatgpt_account_id": "acct-synth",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal fake codex jwt payload: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadRaw)
+	return header + "." + payload + ".signature"
+}
+
 func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
 	now := time.Now()
 
@@ -742,5 +792,202 @@ func TestBuildGeminiVirtualID(t *testing.T) {
 				t.Errorf("expected %q, got %q", tt.want, got)
 			}
 		})
+	}
+}
+
+func TestSynthesizeGeminiVirtualAuths_NotePropagated(t *testing.T) {
+	now := time.Now()
+	primary := &coreauth.Auth{
+		ID:       "primary-id",
+		Provider: "gemini-cli",
+		Label:    "test@example.com",
+		Attributes: map[string]string{
+			"source":   "test-source",
+			"path":     "/path/to/auth",
+			"priority": "5",
+			"note":     "my test note",
+		},
+	}
+	metadata := map[string]any{
+		"project_id": "proj-a, proj-b",
+		"email":      "test@example.com",
+		"type":       "gemini",
+	}
+
+	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+
+	if len(virtuals) != 2 {
+		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
+	}
+
+	for i, v := range virtuals {
+		if got := v.Attributes["note"]; got != "my test note" {
+			t.Errorf("virtual %d: expected note %q, got %q", i, "my test note", got)
+		}
+		if got := v.Attributes["priority"]; got != "5" {
+			t.Errorf("virtual %d: expected priority %q, got %q", i, "5", got)
+		}
+	}
+}
+
+func TestSynthesizeGeminiVirtualAuths_NoteAbsentWhenEmpty(t *testing.T) {
+	now := time.Now()
+	primary := &coreauth.Auth{
+		ID:       "primary-id",
+		Provider: "gemini-cli",
+		Label:    "test@example.com",
+		Attributes: map[string]string{
+			"source": "test-source",
+			"path":   "/path/to/auth",
+		},
+	}
+	metadata := map[string]any{
+		"project_id": "proj-a, proj-b",
+		"email":      "test@example.com",
+		"type":       "gemini",
+	}
+
+	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+
+	if len(virtuals) != 2 {
+		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
+	}
+
+	for i, v := range virtuals {
+		if _, hasNote := v.Attributes["note"]; hasNote {
+			t.Errorf("virtual %d: expected no note attribute when primary has no note", i)
+		}
+	}
+}
+
+func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		note     any
+		want     string
+		hasValue bool
+	}{
+		{
+			name:     "valid string note",
+			note:     "hello world",
+			want:     "hello world",
+			hasValue: true,
+		},
+		{
+			name:     "string note with whitespace",
+			note:     "  trimmed note  ",
+			want:     "trimmed note",
+			hasValue: true,
+		},
+		{
+			name:     "empty string note",
+			note:     "",
+			hasValue: false,
+		},
+		{
+			name:     "whitespace only note",
+			note:     "   ",
+			hasValue: false,
+		},
+		{
+			name:     "non-string note ignored",
+			note:     12345,
+			hasValue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			authData := map[string]any{
+				"type": "claude",
+				"note": tt.note,
+			}
+			data, _ := json.Marshal(authData)
+			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+			if errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			synth := NewFileSynthesizer()
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, errSynthesize := synth.Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			value, ok := auths[0].Attributes["note"]
+			if tt.hasValue {
+				if !ok {
+					t.Fatal("expected note attribute to be set")
+				}
+				if value != tt.want {
+					t.Fatalf("expected note %q, got %q", tt.want, value)
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("expected note attribute to be absent, got %q", value)
+			}
+		})
+	}
+}
+
+func TestFileSynthesizer_Synthesize_MultiProjectGeminiWithNote(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":       "gemini",
+		"email":      "multi@example.com",
+		"project_id": "project-a, project-b",
+		"priority":   5,
+		"note":       "production keys",
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "gemini-multi.json"), data, 0644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should have 3 auths: 1 primary (disabled) + 2 virtuals
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths (1 primary + 2 virtuals), got %d", len(auths))
+	}
+
+	primary := auths[0]
+	if gotNote := primary.Attributes["note"]; gotNote != "production keys" {
+		t.Errorf("expected primary note %q, got %q", "production keys", gotNote)
+	}
+
+	// Verify virtuals inherit note
+	for i := 1; i < len(auths); i++ {
+		v := auths[i]
+		if gotNote := v.Attributes["note"]; gotNote != "production keys" {
+			t.Errorf("expected virtual %d note %q, got %q", i, "production keys", gotNote)
+		}
+		if gotPriority := v.Attributes["priority"]; gotPriority != "5" {
+			t.Errorf("expected virtual %d priority %q, got %q", i, "5", gotPriority)
+		}
 	}
 }

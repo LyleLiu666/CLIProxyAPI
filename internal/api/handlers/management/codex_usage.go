@@ -47,13 +47,13 @@ func shouldFetchCodexUsage(auth *coreauth.Auth) bool {
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false
 	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return false
+	}
 	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
 		return false
 	}
-	if auth.Metadata == nil {
-		return false
-	}
-	return codexAccessTokenForAuth(auth) != ""
+	return codexUsageAccessToken(auth) != ""
 }
 
 func (h *Handler) enrichAuthFileEntry(ctx context.Context, auth *coreauth.Auth, entry gin.H) {
@@ -82,13 +82,9 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (map
 	ctx, cancel := context.WithTimeout(ctx, codexUsageRequestTimeout)
 	defer cancel()
 
-	token, err := h.resolveTokenForAuth(ctx, auth)
-	if err != nil {
-		return nil, err
-	}
-	token = strings.TrimSpace(token)
+	token := strings.TrimSpace(codexUsageAccessToken(auth))
 	if token == "" {
-		return nil, fmt.Errorf("codex access token missing")
+		return nil, nil
 	}
 
 	baseURL := strings.TrimSpace(authAttribute(auth, "base_url"))
@@ -149,6 +145,27 @@ func codexAccessTokenForAuth(auth *coreauth.Auth) string {
 		return strings.TrimSpace(stringValue(raw, "access_token"))
 	}
 	return ""
+}
+
+func codexUsageAccessToken(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	token := strings.TrimSpace(codexAccessTokenForAuth(auth))
+	if token == "" {
+		return ""
+	}
+
+	// Keep auth-files fast and side-effect free: use only the access token already
+	// present in memory, and skip usage probing when it is explicitly expired.
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["expired"]; ok && raw != nil {
+			if ts, ok := parseLastRefreshValue(raw); ok && !ts.After(time.Now().Add(30*time.Second)) {
+				return ""
+			}
+		}
+	}
+	return token
 }
 
 func codexTokenNeedsRefresh(metadata map[string]any) bool {
