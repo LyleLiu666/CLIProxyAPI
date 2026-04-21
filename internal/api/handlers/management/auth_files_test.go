@@ -7,6 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestBuildCodexAuthRecord_PopulatesPlanType(t *testing.T) {
@@ -28,6 +29,17 @@ func TestBuildCodexAuthRecord_PopulatesPlanType(t *testing.T) {
 	}
 	if got, _ := record.Metadata["plan_type"].(string); got != "plus" {
 		t.Fatalf("expected metadata plan_type %q, got %q", "plus", got)
+	}
+}
+
+func TestAuthPriorityValue_TreatsZeroAsUnset(t *testing.T) {
+	priority, ok := authPriorityValue(&coreauth.Auth{
+		Attributes: map[string]string{
+			"priority": "0",
+		},
+	})
+	if ok {
+		t.Fatalf("expected zero priority to be treated as unset, got %d", priority)
 	}
 }
 

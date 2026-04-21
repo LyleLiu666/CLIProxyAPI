@@ -458,26 +458,6 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
-	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
-	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
-	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil {
-			entry["priority"] = parsed
-		}
-	} else if auth.Metadata != nil {
-		if rawPriority, ok := auth.Metadata["priority"]; ok {
-			switch v := rawPriority.(type) {
-			case float64:
-				entry["priority"] = int(v)
-			case int:
-				entry["priority"] = v
-			case string:
-				if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-					entry["priority"] = parsed
-				}
-			}
-		}
-	}
 	// Expose note from Attributes (set by synthesizer from JSON "note" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {

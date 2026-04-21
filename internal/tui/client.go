@@ -155,6 +155,16 @@ func (c *Client) GetAuthFiles() ([]map[string]any, error) {
 	return extractList(wrapper, "files")
 }
 
+// GetAuthFilesWithCodexUsage lists auth credential files and explicitly opts in
+// to Codex usage enrichment for detailed auth views.
+func (c *Client) GetAuthFilesWithCodexUsage() ([]map[string]any, error) {
+	wrapper, err := c.getJSON("/v0/management/auth-files?include_codex_usage=1")
+	if err != nil {
+		return nil, err
+	}
+	return extractList(wrapper, "files")
+}
+
 // DeleteAuthFile deletes a single auth file by name.
 func (c *Client) DeleteAuthFile(name string) error {
 	query := url.Values{}
