@@ -1226,7 +1226,7 @@ func codexAuthUsesAPIKey(auth *coreauth.Auth, authKind string) bool {
 
 func codexModelsForAuth(auth *coreauth.Auth, authKind string) []*ModelInfo {
 	if codexAuthUsesAPIKey(auth, authKind) {
-		return registry.GetOpenAIModels()
+		return registry.GetCodexAllModels()
 	}
 	switch codexPlanType(auth) {
 	case "pro":

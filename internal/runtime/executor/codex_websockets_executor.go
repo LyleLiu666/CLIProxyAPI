@@ -58,6 +58,11 @@ type codexWebsocketSession struct {
 	wsURL  string
 	authID string
 
+	// connCreateSent tracks whether a `response.create` message has been successfully sent
+	// on the current websocket connection. The upstream expects the first message on each
+	// connection to be `response.create`.
+	connCreateSent bool
+
 	writeMu sync.Mutex
 
 	activeMu     sync.Mutex
@@ -686,6 +691,21 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 			return ev.msgType, ev.payload, nil
 		}
 	}
+}
+
+func markCodexWebsocketCreateSent(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) {
+	if sess == nil || conn == nil || len(payload) == 0 {
+		return
+	}
+	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "response.create" {
+		return
+	}
+
+	sess.connMu.Lock()
+	if sess.conn == conn {
+		sess.connCreateSent = true
+	}
+	sess.connMu.Unlock()
 }
 
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
