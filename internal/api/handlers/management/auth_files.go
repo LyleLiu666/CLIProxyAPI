@@ -248,9 +248,12 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	}
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
+	includeCodexUsage := shouldIncludeCodexUsage(c)
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
-			h.enrichAuthFileEntry(c.Request.Context(), auth, entry)
+			if includeCodexUsage {
+				h.enrichAuthFileEntry(c.Request.Context(), auth, entry)
+			}
 			files = append(files, entry)
 		}
 	}
@@ -260,6 +263,18 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+func shouldIncludeCodexUsage(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Query("include_codex_usage"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file

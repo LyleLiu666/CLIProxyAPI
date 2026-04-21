@@ -135,7 +135,7 @@ func TestListAuthFiles_IncludesCodexUsage(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
-	req := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?include_codex_usage=1", nil)
 	ctx.Request = req
 	h.ListAuthFiles(ctx)
 
@@ -195,6 +195,79 @@ func TestListAuthFiles_IncludesCodexUsage(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_DefaultSkipsCodexUsage(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"plan_type": "pro"})
+	}))
+	defer srv.Close()
+
+	authDir := t.TempDir()
+	fileName := "codex-user.json"
+	filePath := filepath.Join(authDir, fileName)
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":     filePath,
+			"base_url": srv.URL + "/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"access_token": "access-token",
+			"account_id":   "acct_123",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), record); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if requestCount != 0 {
+		t.Fatalf("expected no usage requests by default, got %d", requestCount)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	filesRaw, ok := payload["files"].([]any)
+	if !ok || len(filesRaw) != 1 {
+		t.Fatalf("expected 1 auth file entry, got %#v", payload["files"])
+	}
+	entry, ok := filesRaw[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected auth entry object, got %#v", filesRaw[0])
+	}
+	if _, hasUsage := entry["codex_usage"]; hasUsage {
+		t.Fatalf("expected no codex_usage by default, got %#v", entry["codex_usage"])
+	}
+	if _, hasErr := entry["codex_usage_error"]; hasErr {
+		t.Fatalf("expected no codex_usage_error by default, got %#v", entry["codex_usage_error"])
+	}
+}
+
 func TestListAuthFiles_SkipsCodexUsageWhenTokenNeedsRefresh(t *testing.T) {
 	originalFactory := newCodexAuthRefresher
 	t.Cleanup(func() { newCodexAuthRefresher = originalFactory })
@@ -244,7 +317,7 @@ func TestListAuthFiles_SkipsCodexUsageWhenTokenNeedsRefresh(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?include_codex_usage=1", nil)
 	h.ListAuthFiles(ctx)
 
 	if rec.Code != http.StatusOK {
@@ -316,7 +389,7 @@ func TestListAuthFiles_SkipsCodexUsageForDisabledAuth(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?include_codex_usage=1", nil)
 	h.ListAuthFiles(ctx)
 
 	if rec.Code != http.StatusOK {
