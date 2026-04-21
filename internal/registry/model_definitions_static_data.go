@@ -858,6 +858,72 @@ func GetOpenAIModels() []*ModelInfo {
 	}
 }
 
+// GetCodexFreeModels returns the model catalog exposed to Codex free-plan OAuth accounts.
+func GetCodexFreeModels() []*ModelInfo {
+	return filterModelInfosByID(GetOpenAIModels(),
+		"gpt-5.2",
+		"gpt-5.3-codex",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+	)
+}
+
+// GetCodexPlusModels returns the model catalog exposed to Codex plus-plan OAuth accounts.
+func GetCodexPlusModels() []*ModelInfo {
+	return filterModelInfosByID(GetOpenAIModels(),
+		"gpt-5.2",
+		"gpt-5.3-codex",
+		"gpt-5.3-codex-spark",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+	)
+}
+
+// GetCodexProModels returns the model catalog exposed to Codex pro-plan OAuth accounts.
+func GetCodexProModels() []*ModelInfo {
+	return filterModelInfosByID(GetOpenAIModels(),
+		"gpt-5.2",
+		"gpt-5.3-codex",
+		"gpt-5.3-codex-spark",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+	)
+}
+
+// GetCodexTeamModels returns the model catalog exposed to Codex team/business/go OAuth accounts.
+func GetCodexTeamModels() []*ModelInfo {
+	return filterModelInfosByID(GetOpenAIModels(),
+		"gpt-5.2",
+		"gpt-5.3-codex",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+	)
+}
+
+func filterModelInfosByID(models []*ModelInfo, ids ...string) []*ModelInfo {
+	if len(models) == 0 || len(ids) == 0 {
+		return nil
+	}
+
+	allowed := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			allowed[id] = struct{}{}
+		}
+	}
+
+	filtered := make([]*ModelInfo, 0, len(ids))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, ok := allowed[model.ID]; ok {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
 // GetQwenModels returns the standard Qwen model definitions
 func GetQwenModels() []*ModelInfo {
 	return []*ModelInfo{

@@ -1169,11 +1169,23 @@ func codexAuthUsesAPIKey(auth *coreauth.Auth, authKind string) bool {
 }
 
 func codexModelsForAuth(auth *coreauth.Auth, authKind string) []*ModelInfo {
-	models := registry.GetOpenAIModels()
 	if codexAuthUsesAPIKey(auth, authKind) {
-		return models
+		return registry.GetOpenAIModels()
 	}
-	return filterModelsByAllowedIDs(models, codexAllowedModelIDsForPlan(codexPlanType(auth)))
+	switch codexPlanType(auth) {
+	case "pro":
+		return registry.GetCodexProModels()
+	case "plus":
+		return registry.GetCodexPlusModels()
+	case "team":
+		return registry.GetCodexTeamModels()
+	case "free":
+		return registry.GetCodexFreeModels()
+	default:
+		// Keep the unknown-plan fallback conservative so we do not advertise
+		// models that a freshly logged-in or partially synthesized auth may not support.
+		return registry.GetCodexFreeModels()
+	}
 }
 
 func codexPlanType(auth *coreauth.Auth) string {
@@ -1212,43 +1224,6 @@ func normalizeCodexPlanType(plan string) string {
 	default:
 		return ""
 	}
-}
-
-func codexAllowedModelIDsForPlan(plan string) map[string]struct{} {
-	allowed := map[string]struct{}{
-		"gpt-5.2":       {},
-		"gpt-5.3-codex": {},
-		"gpt-5.4":       {},
-		"gpt-5.4-mini":  {},
-	}
-
-	switch normalizeCodexPlanType(plan) {
-	case "free", "team":
-		return allowed
-	case "plus", "pro", "":
-		allowed["gpt-5.3-codex-spark"] = struct{}{}
-		return allowed
-	default:
-		allowed["gpt-5.3-codex-spark"] = struct{}{}
-		return allowed
-	}
-}
-
-func filterModelsByAllowedIDs(models []*ModelInfo, allowed map[string]struct{}) []*ModelInfo {
-	if len(models) == 0 || len(allowed) == 0 {
-		return nil
-	}
-	filtered := make([]*ModelInfo, 0, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		modelID := strings.ToLower(strings.TrimSpace(model.ID))
-		if _, ok := allowed[modelID]; ok {
-			filtered = append(filtered, model)
-		}
-	}
-	return filtered
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -125,6 +126,22 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			}
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+		if provider == "codex" {
+			if rawPlan, ok := metadata["plan_type"].(string); ok {
+				if plan := strings.TrimSpace(rawPlan); plan != "" {
+					a.Attributes["plan_type"] = plan
+				}
+			}
+			if strings.TrimSpace(a.Attributes["plan_type"]) == "" {
+				if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+					if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
+						if plan := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); plan != "" {
+							a.Attributes["plan_type"] = plan
+						}
+					}
+				}
+			}
+		}
 		if provider == "gemini-cli" {
 			if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 				for _, v := range virtuals {

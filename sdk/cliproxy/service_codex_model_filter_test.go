@@ -99,6 +99,39 @@ func TestRegisterModelsForAuth_CodexOAuthTeamHidesSpark(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuth_CodexOAuthWithoutPlanFallsBackConservatively(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{},
+	}
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth-unknown-plan",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"email": "codex-unknown@example.com",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+
+	ids := collectRegisteredModelIDs(reg.GetModelsForClient(auth.ID))
+	if _, ok := ids["gpt-5.3-codex"]; !ok {
+		t.Fatal("expected conservative fallback to keep gpt-5.3-codex")
+	}
+	if _, ok := ids["gpt-5.3-codex-spark"]; ok {
+		t.Fatal("expected conservative fallback to hide gpt-5.3-codex-spark")
+	}
+}
+
 func TestRegisterModelsForAuth_CodexAPIKeyKeepsFullOpenAICatalog(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{},
