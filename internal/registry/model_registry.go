@@ -109,6 +109,8 @@ type ModelRegistry struct {
 	models map[string]*ModelRegistration
 	// clientModels maps client ID to the models it provides
 	clientModels map[string][]string
+	// clientModelSets caches normalized model IDs for O(1) support checks.
+	clientModelSets map[string]map[string]struct{}
 	// clientModelInfos maps client ID to a map of model ID -> ModelInfo
 	// This preserves the original model info provided by each client
 	clientModelInfos map[string]map[string]*ModelInfo
@@ -130,6 +132,7 @@ func GetGlobalRegistry() *ModelRegistry {
 		globalRegistry = &ModelRegistry{
 			models:           make(map[string]*ModelRegistration),
 			clientModels:     make(map[string][]string),
+			clientModelSets:  make(map[string]map[string]struct{}),
 			clientModelInfos: make(map[string]map[string]*ModelInfo),
 			clientProviders:  make(map[string]string),
 			mutex:            &sync.RWMutex{},
@@ -234,6 +237,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		// No models supplied; unregister existing client state if present.
 		r.unregisterClientInternal(clientID)
 		delete(r.clientModels, clientID)
+		delete(r.clientModelSets, clientID)
 		delete(r.clientModelInfos, clientID)
 		delete(r.clientProviders, clientID)
 		misc.LogCredentialSeparator()
@@ -252,6 +256,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			r.addModelRegistration(modelID, provider, model, now)
 		}
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		r.clientModelSets[clientID] = buildClientModelSet(rawModelIDs)
 		// Store client's own model infos
 		clientInfos := make(map[string]*ModelInfo, len(newModels))
 		for id, m := range newModels {
@@ -393,6 +398,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	// Update client bookkeeping.
 	if len(rawModelIDs) > 0 {
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		r.clientModelSets[clientID] = buildClientModelSet(rawModelIDs)
 	}
 	// Update client's own model infos
 	clientInfos := make(map[string]*ModelInfo, len(newModels))
@@ -531,6 +537,28 @@ func cloneModelInfosUnique(models []*ModelInfo) []*ModelInfo {
 	return cloned
 }
 
+func buildClientModelSet(modelIDs []string) map[string]struct{} {
+	if len(modelIDs) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(modelIDs))
+	for _, id := range modelIDs {
+		key := normalizeClientModelID(id)
+		if key == "" {
+			continue
+		}
+		set[key] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func normalizeClientModelID(modelID string) string {
+	return strings.ToLower(strings.TrimSpace(modelID))
+}
+
 // UnregisterClient removes a client and decrements counts for its models
 // Parameters:
 //   - clientID: Unique identifier for the client to remove
@@ -587,6 +615,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	}
 
 	delete(r.clientModels, clientID)
+	delete(r.clientModelSets, clientID)
 	delete(r.clientModelInfos, clientID)
 	if hasProvider {
 		delete(r.clientProviders, clientID)
@@ -690,13 +719,19 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
+	if modelSet, exists := r.clientModelSets[clientID]; exists && len(modelSet) > 0 {
+		_, supported := modelSet[normalizeClientModelID(modelID)]
+		return supported
+	}
+
 	models, exists := r.clientModels[clientID]
 	if !exists || len(models) == 0 {
 		return false
 	}
 
+	normalizedModelID := normalizeClientModelID(modelID)
 	for _, id := range models {
-		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+		if normalizeClientModelID(id) == normalizedModelID {
 			return true
 		}
 	}

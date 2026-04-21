@@ -40,7 +40,9 @@ type upstreamRequestLog struct {
 type upstreamAttempt struct {
 	index                int
 	request              string
+	requestMirrored      bool
 	response             *strings.Builder
+	responseMirroredLen  int
 	responseIntroWritten bool
 	statusWritten        bool
 	headersWritten       bool
@@ -93,7 +95,7 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
-	updateAggregatedRequest(ginCtx, attempts)
+	updateAggregatedRequest(ginCtx, attempt)
 }
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
@@ -105,7 +107,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	_, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
 	if status > 0 && !attempt.statusWritten {
@@ -119,7 +121,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 		attempt.response.WriteString("\n")
 	}
 
-	updateAggregatedResponse(ginCtx, attempts)
+	updateAggregatedResponse(ginCtx, attempt)
 }
 
 // recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
@@ -131,7 +133,7 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	_, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
 	if attempt.bodyStarted && !attempt.bodyHasContent {
@@ -144,7 +146,7 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
 	attempt.errorWritten = true
 
-	updateAggregatedResponse(ginCtx, attempts)
+	updateAggregatedResponse(ginCtx, attempt)
 }
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
@@ -160,7 +162,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	_, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
 	if !attempt.headersWritten {
@@ -179,7 +181,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	attempt.response.WriteString(string(data))
 	attempt.bodyHasContent = true
 
-	updateAggregatedResponse(ginCtx, attempts)
+	updateAggregatedResponse(ginCtx, attempt)
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
@@ -209,7 +211,7 @@ func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
 		}
 		attempts = []*upstreamAttempt{attempt}
 		ginCtx.Set(apiAttemptsKey, attempts)
-		updateAggregatedRequest(ginCtx, attempts)
+		updateAggregatedRequest(ginCtx, attempt)
 	}
 	return attempts, attempts[len(attempts)-1]
 }
@@ -224,39 +226,48 @@ func ensureResponseIntro(attempt *upstreamAttempt) {
 	attempt.responseIntroWritten = true
 }
 
-func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
+func updateAggregatedRequest(ginCtx *gin.Context, attempt *upstreamAttempt) {
+	if ginCtx == nil || attempt == nil || attempt.request == "" || attempt.requestMirrored {
 		return
 	}
-	var builder strings.Builder
-	for _, attempt := range attempts {
-		builder.WriteString(attempt.request)
+
+	var aggregated []byte
+	if existing, exists := ginCtx.Get(apiRequestKey); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			aggregated = existingBytes
+		}
 	}
-	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+	aggregated = append(aggregated, attempt.request...)
+	ginCtx.Set(apiRequestKey, aggregated)
+	attempt.requestMirrored = true
 }
 
-func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
+func updateAggregatedResponse(ginCtx *gin.Context, attempt *upstreamAttempt) {
+	if ginCtx == nil || attempt == nil || attempt.response == nil {
 		return
 	}
-	var builder strings.Builder
-	for idx, attempt := range attempts {
-		if attempt == nil || attempt.response == nil {
-			continue
-		}
-		responseText := attempt.response.String()
-		if responseText == "" {
-			continue
-		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
-		}
-		if idx < len(attempts)-1 {
-			builder.WriteString("\n")
+
+	responseText := attempt.response.String()
+	if responseText == "" || attempt.responseMirroredLen >= len(responseText) {
+		return
+	}
+
+	var aggregated []byte
+	if existing, exists := ginCtx.Get(apiResponseKey); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			aggregated = existingBytes
 		}
 	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	if attempt.responseMirroredLen == 0 && len(aggregated) > 0 {
+		if aggregated[len(aggregated)-1] != '\n' {
+			aggregated = append(aggregated, '\n')
+		}
+		aggregated = append(aggregated, '\n')
+	}
+
+	aggregated = append(aggregated, responseText[attempt.responseMirroredLen:]...)
+	attempt.responseMirroredLen = len(responseText)
+	ginCtx.Set(apiResponseKey, aggregated)
 }
 
 func writeHeaders(builder *strings.Builder, headers http.Header) {
