@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -406,6 +407,55 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	if got != want {
 		t.Fatalf("expected excluded_models %q, got %q", want, got)
 	}
+}
+
+func TestFileSynthesizer_Synthesize_CodexPlanTypeFromIDToken(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":     "codex",
+		"email":    "codex@example.com",
+		"id_token": fakeCodexIDTokenForSynthTest(t, "team"),
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Attributes["plan_type"] != "team" {
+		t.Fatalf("expected plan_type %q, got %q", "team", auths[0].Attributes["plan_type"])
+	}
+}
+
+func fakeCodexIDTokenForSynthTest(t *testing.T, planType string) string {
+	t.Helper()
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payloadRaw, err := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type":  planType,
+			"chatgpt_account_id": "acct-synth",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal fake codex jwt payload: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadRaw)
+	return header + "." + payload + ".signature"
 }
 
 func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
