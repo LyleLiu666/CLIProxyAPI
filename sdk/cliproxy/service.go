@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -817,7 +818,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		models = registry.GetOpenAIModels()
+		models = codexModelsForAuth(a, authKind)
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)
@@ -1151,6 +1152,99 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 			}
 		}
 		if !blocked {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+func codexAuthUsesAPIKey(auth *coreauth.Auth, authKind string) bool {
+	if strings.EqualFold(strings.TrimSpace(authKind), "apikey") {
+		return true
+	}
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return strings.TrimSpace(auth.Attributes["api_key"]) != ""
+}
+
+func codexModelsForAuth(auth *coreauth.Auth, authKind string) []*ModelInfo {
+	models := registry.GetOpenAIModels()
+	if codexAuthUsesAPIKey(auth, authKind) {
+		return models
+	}
+	return filterModelsByAllowedIDs(models, codexAllowedModelIDsForPlan(codexPlanType(auth)))
+}
+
+func codexPlanType(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if plan := normalizeCodexPlanType(auth.Attributes["plan_type"]); plan != "" {
+			return plan
+		}
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["plan_type"].(string); ok {
+			if plan := normalizeCodexPlanType(raw); plan != "" {
+				return plan
+			}
+		}
+		if raw, ok := auth.Metadata["id_token"].(string); ok {
+			idToken := strings.TrimSpace(raw)
+			if idToken != "" {
+				if claims, err := codexauth.ParseJWTToken(idToken); err == nil && claims != nil {
+					return normalizeCodexPlanType(claims.CodexAuthInfo.ChatgptPlanType)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeCodexPlanType(plan string) string {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "business", "go":
+		return "team"
+	case "free", "plus", "pro", "team":
+		return strings.ToLower(strings.TrimSpace(plan))
+	default:
+		return ""
+	}
+}
+
+func codexAllowedModelIDsForPlan(plan string) map[string]struct{} {
+	allowed := map[string]struct{}{
+		"gpt-5.2":       {},
+		"gpt-5.3-codex": {},
+		"gpt-5.4":       {},
+		"gpt-5.4-mini":  {},
+	}
+
+	switch normalizeCodexPlanType(plan) {
+	case "free", "team":
+		return allowed
+	case "plus", "pro", "":
+		allowed["gpt-5.3-codex-spark"] = struct{}{}
+		return allowed
+	default:
+		allowed["gpt-5.3-codex-spark"] = struct{}{}
+		return allowed
+	}
+}
+
+func filterModelsByAllowedIDs(models []*ModelInfo, allowed map[string]struct{}) []*ModelInfo {
+	if len(models) == 0 || len(allowed) == 0 {
+		return nil
+	}
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		if _, ok := allowed[modelID]; ok {
 			filtered = append(filtered, model)
 		}
 	}
