@@ -35,7 +35,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
-		return GetOpenAIModels()
+		return GetCodexProModels()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
