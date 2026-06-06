@@ -349,6 +349,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if eventType == "response.completed" {
 			if detail, ok := parseCodexUsage(payload); ok {
 				reporter.publish(ctx, detail)
+			} else {
+				reporter.ensurePublished(ctx)
 			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, transcript.Bytes(), &param)
@@ -595,6 +597,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if eventType == "response.completed" || eventType == "response.done" {
 				if detail, ok := parseCodexUsage(payload); ok {
 					reporter.publish(ctx, detail)
+				} else {
+					reporter.ensurePublished(ctx)
 				}
 			}
 

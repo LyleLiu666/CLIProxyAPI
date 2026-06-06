@@ -1,13 +1,18 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -74,5 +79,63 @@ func TestGetUsageStatisticsCanIncludeLimitedDetails(t *testing.T) {
 	}
 	if got := details[0].Tokens.TotalTokens; got != 30 {
 		t.Fatalf("latest detail total tokens = %d, want 30", got)
+	}
+}
+
+func TestPutUsageStatisticsEnabledUpdatesRuntimeGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	wasEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(false)
+	defer usage.SetStatisticsEnabled(wasEnabled)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("usage-statistics-enabled: false\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	h := NewHandler(&config.Config{UsageStatisticsEnabled: false}, configPath, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/usage-statistics-enabled", bytes.NewBufferString(`{"value":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutUsageStatisticsEnabled(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if !h.cfg.UsageStatisticsEnabled {
+		t.Fatal("handler config usage-statistics-enabled stayed false")
+	}
+	if !usage.StatisticsEnabled() {
+		t.Fatal("runtime usage statistics gate stayed disabled after management update")
+	}
+}
+
+func TestPutUsageStatisticsEnabledDoesNotDirtyRuntimeWhenPersistFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	wasEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(false)
+	defer usage.SetStatisticsEnabled(wasEnabled)
+
+	h := NewHandler(&config.Config{UsageStatisticsEnabled: false}, filepath.Join(t.TempDir(), "missing", "config.yaml"), nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/usage-statistics-enabled", bytes.NewBufferString(`{"value":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutUsageStatisticsEnabled(ctx)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+	if h.cfg.UsageStatisticsEnabled {
+		t.Fatal("handler config was dirtied even though persistence failed")
+	}
+	if usage.StatisticsEnabled() {
+		t.Fatal("runtime usage statistics gate changed even though persistence failed")
 	}
 }
