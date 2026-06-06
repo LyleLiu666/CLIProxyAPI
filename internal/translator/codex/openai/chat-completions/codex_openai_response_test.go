@@ -91,44 +91,80 @@ func TestConvertCodexResponseToOpenAI_ToolCallArgumentsDeltaOmitsNullContentFiel
 	}
 }
 
-func TestConvertCodexResponseToOpenAINonStream_UsesSSETranscriptDeltas(t *testing.T) {
-	raw := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1776774745,\"model\":\"gpt-5.4-mini-2026-03-17\"}}\n" +
-		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n" +
-		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"created_at\":1776774745,\"model\":\"gpt-5.4-mini-2026-03-17\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":18,\"total_tokens\":28,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":11}}}}\n")
+func TestConvertCodexResponseToOpenAI_StreamPartialImageEmitsDeltaImages(t *testing.T) {
+	ctx := context.Background()
+	var param any
 
-	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "", nil, nil, raw, nil)
-	if len(out) == 0 {
-		t.Fatal("expected non-empty output")
+	chunk := []byte(`data: {"type":"response.image_generation_call.partial_image","item_id":"ig_123","output_format":"png","partial_image_b64":"aGVsbG8=","partial_image_index":0}`)
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "pong" {
-		t.Fatalf("choices.0.message.content = %q, want %q", got, "pong")
+	gotURL := gjson.GetBytes(out[0], "choices.0.delta.images.0.image_url.url").String()
+	if gotURL != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("expected image url %q, got %q; chunk=%s", "data:image/png;base64,aGVsbG8=", gotURL, string(out[0]))
 	}
-	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "stop" {
-		t.Fatalf("choices.0.finish_reason = %q, want %q", got, "stop")
-	}
-	if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got != 10 {
-		t.Fatalf("usage.prompt_tokens = %d, want %d", got, 10)
-	}
-	if got := gjson.GetBytes(out, "usage.completion_tokens").Int(); got != 18 {
-		t.Fatalf("usage.completion_tokens = %d, want %d", got, 18)
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param)
+	if len(out) != 0 {
+		t.Fatalf("expected duplicate image chunk to be suppressed, got %d", len(out))
 	}
 }
 
-func TestConvertCodexResponseToOpenAINonStream_UsesJSONTranscriptDeltas(t *testing.T) {
-	raw := []byte("{\"type\":\"response.created\",\"response\":{\"id\":\"resp_456\",\"created_at\":1776774746,\"model\":\"gpt-5.4-mini-2026-03-17\"}}\n" +
-		"{\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n" +
-		"{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_456\",\"created_at\":1776774746,\"model\":\"gpt-5.4-mini-2026-03-17\",\"status\":\"completed\"}}\n")
+func TestConvertCodexResponseToOpenAI_StreamImageGenerationCallDoneEmitsDeltaImages(t *testing.T) {
+	ctx := context.Background()
+	var param any
 
-	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "", nil, nil, raw, nil)
-	if len(out) == 0 {
-		t.Fatal("expected non-empty output")
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.image_generation_call.partial_image","item_id":"ig_123","output_format":"png","partial_image_b64":"aGVsbG8=","partial_image_index":0}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "pong" {
-		t.Fatalf("choices.0.message.content = %q, want %q", got, "pong")
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"id":"ig_123","type":"image_generation_call","output_format":"png","result":"aGVsbG8="}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected output_item.done to be suppressed when identical to last partial image, got %d", len(out))
 	}
-	if got := gjson.GetBytes(out, "id").String(); got != "resp_456" {
-		t.Fatalf("id = %q, want %q", got, "resp_456")
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"id":"ig_123","type":"image_generation_call","output_format":"jpeg","result":"Ymll"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	gotURL := gjson.GetBytes(out[0], "choices.0.delta.images.0.image_url.url").String()
+	if gotURL != "data:image/jpeg;base64,Ymll" {
+		t.Fatalf("expected image url %q, got %q; chunk=%s", "data:image/jpeg;base64,Ymll", gotURL, string(out[0]))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamImageGenerationCallAddsMessageImages(t *testing.T) {
+	ctx := context.Background()
+
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"image_generation_call","output_format":"png","result":"aGVsbG8="}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+
+	gotURL := gjson.GetBytes(out, "choices.0.message.images.0.image_url.url").String()
+	if gotURL != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("expected image url %q, got %q; chunk=%s", "data:image/png;base64,aGVsbG8=", gotURL, string(out))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsContent(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.5","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"output":[` +
+		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},` +
+		`{"type":"message","content":[{"type":"output_text","text":"the real answer"}]},` +
+		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking again"}]},` +
+		`{"type":"message","content":[{"type":"output_text","text":""}]}` +
+		`]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.5", nil, nil, raw, nil)
+
+	got := gjson.GetBytes(out, "choices.0.message.content")
+	if !got.Exists() || got.Type == gjson.Null {
+		t.Fatalf("content was dropped to null by trailing empty message; resp=%s", string(out))
+	}
+	if got.String() != "the real answer" {
+		t.Fatalf("expected content %q, got %q; resp=%s", "the real answer", got.String(), string(out))
 	}
 }

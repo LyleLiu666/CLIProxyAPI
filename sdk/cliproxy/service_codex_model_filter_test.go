@@ -1,14 +1,15 @@
 package cliproxy
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestRegisterModelsForAuth_CodexOAuthUsesPlanSpecificCatalog(t *testing.T) {
@@ -34,7 +35,7 @@ func TestRegisterModelsForAuth_CodexOAuthUsesPlanSpecificCatalog(t *testing.T) {
 		reg.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := reg.GetModelsForClient(auth.ID)
 	if len(models) == 0 {
@@ -58,7 +59,7 @@ func TestRegisterModelsForAuth_CodexOAuthUsesPlanSpecificCatalog(t *testing.T) {
 		}
 	}
 
-	for _, allowed := range []string{"gpt-5.2", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"} {
+	for _, allowed := range []string{"gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"} {
 		if _, ok := ids[allowed]; !ok {
 			t.Fatalf("expected ChatGPT-backed codex auth to keep model %q", allowed)
 		}
@@ -88,11 +89,11 @@ func TestRegisterModelsForAuth_CodexOAuthTeamHidesSpark(t *testing.T) {
 		reg.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	ids := collectRegisteredModelIDs(reg.GetModelsForClient(auth.ID))
-	if _, ok := ids["gpt-5.3-codex"]; !ok {
-		t.Fatal("expected team plan to keep gpt-5.3-codex")
+	if _, ok := ids["gpt-5.4"]; !ok {
+		t.Fatal("expected team plan to keep gpt-5.4")
 	}
 	if _, ok := ids["gpt-5.3-codex-spark"]; ok {
 		t.Fatal("expected team plan to hide gpt-5.3-codex-spark")
@@ -121,11 +122,11 @@ func TestRegisterModelsForAuth_CodexOAuthWithoutPlanFallsBackConservatively(t *t
 		reg.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	ids := collectRegisteredModelIDs(reg.GetModelsForClient(auth.ID))
-	if _, ok := ids["gpt-5.3-codex"]; !ok {
-		t.Fatal("expected conservative fallback to keep gpt-5.3-codex")
+	if _, ok := ids["gpt-5.4-mini"]; !ok {
+		t.Fatal("expected conservative fallback to keep gpt-5.4-mini")
 	}
 	if _, ok := ids["gpt-5.3-codex-spark"]; ok {
 		t.Fatal("expected conservative fallback to hide gpt-5.3-codex-spark")
@@ -152,7 +153,7 @@ func TestRegisterModelsForAuth_CodexAPIKeyKeepsFullOpenAICatalog(t *testing.T) {
 		reg.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := reg.GetModelsForClient(auth.ID)
 	if len(models) == 0 {
@@ -160,7 +161,7 @@ func TestRegisterModelsForAuth_CodexAPIKeyKeepsFullOpenAICatalog(t *testing.T) {
 	}
 
 	ids := collectRegisteredModelIDs(models)
-	for _, expected := range []string{"gpt-5-codex", "gpt-5.1-codex-max", "gpt-5.4-mini"} {
+	for _, expected := range []string{"gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-image-2"} {
 		if _, ok := ids[expected]; !ok {
 			t.Fatalf("expected codex api key auth to keep model %q", expected)
 		}

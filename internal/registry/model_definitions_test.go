@@ -2,24 +2,39 @@ package registry
 
 import "testing"
 
-func TestGetStaticModelDefinitionsByChannel_CodexUsesCurrentCatalog(t *testing.T) {
-	models := GetStaticModelDefinitionsByChannel("codex")
-	if len(models) == 0 {
-		t.Fatal("expected codex static models")
-	}
+func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
+	models := WithXAIBuiltins(nil)
 
-	ids := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		if model == nil {
 			continue
 		}
-		ids[model.ID] = struct{}{}
+		if model.ID == xaiBuiltinVideo15PreviewModelID {
+			return
+		}
 	}
 
-	if _, ok := ids["gpt-5.4-mini"]; !ok {
-		t.Fatal("expected codex static catalog to include gpt-5.4-mini")
+	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
+}
+
+func TestGetCodexAllModelsReturnsDeduplicatedPlanUnion(t *testing.T) {
+	models := GetCodexAllModels()
+	if len(models) == 0 {
+		t.Fatal("expected codex all models")
 	}
-	if _, ok := ids["gpt-5.1-codex-max"]; ok {
-		t.Fatal("expected codex static catalog to exclude legacy gpt-5.1-codex-max")
+
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil || model.ID == "" {
+			t.Fatalf("expected populated model, got %#v", model)
+		}
+		if _, exists := seen[model.ID]; exists {
+			t.Fatalf("expected de-duplicated models, got duplicate %q", model.ID)
+		}
+		seen[model.ID] = struct{}{}
+	}
+
+	if _, ok := seen[codexBuiltinImageModelID]; !ok {
+		t.Fatalf("expected codex builtin model %s", codexBuiltinImageModelID)
 	}
 }

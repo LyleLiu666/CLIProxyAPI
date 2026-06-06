@@ -8,6 +8,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type ConvertCliToOpenAIParams struct {
 	FunctionCallIndex         int
 	HasReceivedArgumentsDelta bool
 	HasToolCallAnnounced      bool
+	LastImageHashByItemID     map[string][32]byte
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -52,6 +54,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			FunctionCallIndex:         -1,
 			HasReceivedArgumentsDelta: false,
 			HasToolCallAnnounced:      false,
+			LastImageHashByItemID:     make(map[string][32]byte),
 		}
 	}
 
@@ -71,6 +74,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).ResponseID = rootResult.Get("response.id").String()
 		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
 		(*param).(*ConvertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
+		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
+			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID = make(map[string][32]byte)
+		}
 		return [][]byte{}
 	}
 
@@ -121,6 +127,39 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", deltaResult.String())
 		}
+	} else if dataType == "response.image_generation_call.partial_image" {
+		itemID := rootResult.Get("item_id").String()
+		b64 := rootResult.Get("partial_image_b64").String()
+		if b64 == "" {
+			return [][]byte{}
+		}
+		if itemID != "" {
+			p := (*param).(*ConvertCliToOpenAIParams)
+			if p.LastImageHashByItemID == nil {
+				p.LastImageHashByItemID = make(map[string][32]byte)
+			}
+			hash := sha256.Sum256([]byte(b64))
+			if last, ok := p.LastImageHashByItemID[itemID]; ok && last == hash {
+				return [][]byte{}
+			}
+			p.LastImageHashByItemID[itemID] = hash
+		}
+
+		outputFormat := rootResult.Get("output_format").String()
+		mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+		imageURL := "data:" + mimeType + ";base64," + b64
+
+		imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
+		if !imagesResult.Exists() || !imagesResult.IsArray() {
+			template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
+		}
+		imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+		imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+		imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
+		imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+
+		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+		template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 	} else if dataType == "response.completed" {
 		finishReason := "stop"
 		if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
@@ -184,7 +223,46 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 	} else if dataType == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
-		if !itemResult.Exists() || itemResult.Get("type").String() != "function_call" {
+		if !itemResult.Exists() {
+			return [][]byte{}
+		}
+		itemType := itemResult.Get("type").String()
+		if itemType == "image_generation_call" {
+			itemID := itemResult.Get("id").String()
+			b64 := itemResult.Get("result").String()
+			if b64 == "" {
+				return [][]byte{}
+			}
+			if itemID != "" {
+				p := (*param).(*ConvertCliToOpenAIParams)
+				if p.LastImageHashByItemID == nil {
+					p.LastImageHashByItemID = make(map[string][32]byte)
+				}
+				hash := sha256.Sum256([]byte(b64))
+				if last, ok := p.LastImageHashByItemID[itemID]; ok && last == hash {
+					return [][]byte{}
+				}
+				p.LastImageHashByItemID[itemID] = hash
+			}
+
+			outputFormat := itemResult.Get("output_format").String()
+			mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+			imageURL := "data:" + mimeType + ";base64," + b64
+
+			imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
+			if !imagesResult.Exists() || !imagesResult.IsArray() {
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
+			}
+			imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+			imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+			imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
+			imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+
+			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+			template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
+			return [][]byte{template}
+		}
+		if itemType != "function_call" {
 			return [][]byte{}
 		}
 
@@ -236,12 +314,15 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	responseResult, contentText, reasoningText, toolCalls, ok := parseCodexNonStreamTranscript(rawJSON, originalRequestRawJSON)
-	if !ok {
+	rootResult := gjson.ParseBytes(rawJSON)
+	// Verify this is a response.completed event
+	if rootResult.Get("type").String() != "response.completed" {
 		return []byte{}
 	}
 
 	unixTimestamp := time.Now().Unix()
+
+	responseResult := rootResult.Get("response")
 
 	template := []byte(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
@@ -281,240 +362,127 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		}
 	}
 
-	if contentText != "" {
-		template, _ = sjson.SetBytes(template, "choices.0.message.content", contentText)
-		template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
-	}
+	// Process the output array for content and function calls
+	var toolCalls [][]byte
+	var images [][]byte
+	outputResult := responseResult.Get("output")
+	if outputResult.IsArray() {
+		outputArray := outputResult.Array()
+		var contentText string
+		var reasoningText string
 
-	if reasoningText != "" {
-		template, _ = sjson.SetBytes(template, "choices.0.message.reasoning_content", reasoningText)
-		template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
-	}
+		for _, outputItem := range outputArray {
+			outputType := outputItem.Get("type").String()
 
-	if len(toolCalls) > 0 {
-		template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
-		for _, toolCall := range toolCalls {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", []byte(toolCall))
+			switch outputType {
+			case "reasoning":
+				// Extract reasoning content from summary
+				if summaryResult := outputItem.Get("summary"); summaryResult.IsArray() {
+					summaryArray := summaryResult.Array()
+					for _, summaryItem := range summaryArray {
+						if summaryItem.Get("type").String() == "summary_text" {
+							if text := summaryItem.Get("text").String(); text != "" {
+								reasoningText += text
+							}
+							break
+						}
+					}
+				}
+			case "message":
+				// Extract message content
+				if contentResult := outputItem.Get("content"); contentResult.IsArray() {
+					contentArray := contentResult.Array()
+					for _, contentItem := range contentArray {
+						if contentItem.Get("type").String() == "output_text" {
+							if text := contentItem.Get("text").String(); text != "" {
+								contentText += text
+							}
+							break
+						}
+					}
+				}
+			case "function_call":
+				// Handle function call content
+				functionCallTemplate := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+
+				if callIdResult := outputItem.Get("call_id"); callIdResult.Exists() {
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", callIdResult.String())
+				}
+
+				if nameResult := outputItem.Get("name"); nameResult.Exists() {
+					n := nameResult.String()
+					rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+					if orig, ok := rev[n]; ok {
+						n = orig
+					}
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", n)
+				}
+
+				if argsResult := outputItem.Get("arguments"); argsResult.Exists() {
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", argsResult.String())
+				}
+
+				toolCalls = append(toolCalls, functionCallTemplate)
+			case "image_generation_call":
+				b64 := outputItem.Get("result").String()
+				if b64 == "" {
+					break
+				}
+				outputFormat := outputItem.Get("output_format").String()
+				mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+				imageURL := "data:" + mimeType + ";base64," + b64
+
+				imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+				imagePayload, _ = sjson.SetBytes(imagePayload, "index", len(images))
+				imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+				images = append(images, imagePayload)
+			}
 		}
-		template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
+
+		// Set content and reasoning content if found
+		if contentText != "" {
+			template, _ = sjson.SetBytes(template, "choices.0.message.content", contentText)
+			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
+		}
+
+		if reasoningText != "" {
+			template, _ = sjson.SetBytes(template, "choices.0.message.reasoning_content", reasoningText)
+			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
+		}
+
+		// Add tool calls if any
+		if len(toolCalls) > 0 {
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
+			for _, toolCall := range toolCalls {
+				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
+		}
+
+		// Add images if any
+		if len(images) > 0 {
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.images", []byte(`[]`))
+			for _, image := range images {
+				template, _ = sjson.SetRawBytes(template, "choices.0.message.images.-1", image)
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
+		}
 	}
 
 	// Extract and set the finish reason based on status
 	if statusResult := responseResult.Get("status"); statusResult.Exists() {
 		status := statusResult.String()
 		if status == "completed" {
-			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "stop")
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "stop")
+			finishReason := "stop"
+			if len(toolCalls) > 0 {
+				finishReason = "tool_calls"
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
 		}
 	}
 
 	return template
-}
-
-type codexToolCallState struct {
-	Arguments strings.Builder
-	CallID    string
-	Name      string
-}
-
-func parseCodexNonStreamTranscript(rawJSON, originalRequestRawJSON []byte) (gjson.Result, string, string, []string, bool) {
-	rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
-	var completedResponse gjson.Result
-	var transcriptContent strings.Builder
-	var transcriptReasoning strings.Builder
-	var toolStates []*codexToolCallState
-
-	lines := bytes.Split(rawJSON, []byte("\n"))
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		if bytes.HasPrefix(line, dataTag) {
-			line = bytes.TrimSpace(line[len(dataTag):])
-		}
-		if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) || !gjson.ValidBytes(line) {
-			continue
-		}
-
-		root := gjson.ParseBytes(line)
-		switch root.Get("type").String() {
-		case "response.output_text.delta":
-			transcriptContent.WriteString(root.Get("delta").String())
-		case "response.reasoning_summary_text.delta":
-			transcriptReasoning.WriteString(root.Get("delta").String())
-		case "response.output_item.added":
-			item := root.Get("item")
-			if item.Get("type").String() == "function_call" {
-				toolStates = upsertCodexToolCall(toolStates, item, rev)
-			}
-		case "response.function_call_arguments.delta":
-			if len(toolStates) == 0 {
-				toolStates = append(toolStates, &codexToolCallState{})
-			}
-			toolStates[len(toolStates)-1].Arguments.WriteString(root.Get("delta").String())
-		case "response.function_call_arguments.done":
-			if len(toolStates) == 0 {
-				toolStates = append(toolStates, &codexToolCallState{})
-			}
-			if toolStates[len(toolStates)-1].Arguments.Len() == 0 {
-				toolStates[len(toolStates)-1].Arguments.WriteString(root.Get("arguments").String())
-			}
-		case "response.output_item.done":
-			item := root.Get("item")
-			if item.Get("type").String() == "function_call" {
-				toolStates = upsertCodexToolCall(toolStates, item, rev)
-			}
-		case "response.completed":
-			completedResponse = root.Get("response")
-		}
-	}
-
-	if !completedResponse.Exists() {
-		return gjson.Result{}, "", "", nil, false
-	}
-
-	contentText, reasoningText, toolCalls := extractCodexResponseOutput(completedResponse, rev)
-	if contentText == "" {
-		contentText = transcriptContent.String()
-	}
-	if reasoningText == "" {
-		reasoningText = transcriptReasoning.String()
-	}
-	if len(toolCalls) == 0 {
-		toolCalls = buildCodexToolCalls(toolStates)
-	}
-
-	return completedResponse, contentText, reasoningText, toolCalls, true
-}
-
-func extractCodexResponseOutput(responseResult gjson.Result, rev map[string]string) (string, string, []string) {
-	outputResult := responseResult.Get("output")
-	if !outputResult.IsArray() {
-		return "", "", nil
-	}
-
-	var contentBuilder strings.Builder
-	var reasoningBuilder strings.Builder
-	var toolCalls []string
-
-	outputResult.ForEach(func(_, outputItem gjson.Result) bool {
-		switch outputItem.Get("type").String() {
-		case "reasoning":
-			if summary := outputItem.Get("summary"); summary.Exists() {
-				appendCodexTextParts(&reasoningBuilder, summary)
-			}
-			if reasoningBuilder.Len() == 0 {
-				appendCodexTextParts(&reasoningBuilder, outputItem.Get("content"))
-			}
-		case "message":
-			appendCodexTextParts(&contentBuilder, outputItem.Get("content"))
-		case "function_call":
-			functionCallTemplate := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
-			if callID := outputItem.Get("call_id"); callID.Exists() {
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", callID.String())
-			}
-			if name := outputItem.Get("name").String(); name != "" {
-				if original, ok := rev[name]; ok {
-					name = original
-				}
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", name)
-			}
-			if args := outputItem.Get("arguments"); args.Exists() {
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", args.String())
-			}
-			toolCalls = append(toolCalls, functionCallTemplate)
-		}
-		return true
-	})
-
-	return contentBuilder.String(), reasoningBuilder.String(), toolCalls
-}
-
-func appendCodexTextParts(builder *strings.Builder, parts gjson.Result) {
-	if builder == nil || !parts.Exists() {
-		return
-	}
-	if parts.IsArray() {
-		parts.ForEach(func(_, part gjson.Result) bool {
-			if text := extractCodexText(part); text != "" {
-				builder.WriteString(text)
-			}
-			return true
-		})
-		return
-	}
-	if text := extractCodexText(parts); text != "" {
-		builder.WriteString(text)
-	}
-}
-
-func extractCodexText(part gjson.Result) string {
-	if !part.Exists() {
-		return ""
-	}
-	if text := part.Get("text"); text.Exists() {
-		partType := part.Get("type").String()
-		if partType == "" || partType == "output_text" || partType == "summary_text" || partType == "text" {
-			return text.String()
-		}
-	}
-	if part.Type == gjson.String {
-		return part.String()
-	}
-	return ""
-}
-
-func upsertCodexToolCall(states []*codexToolCallState, item gjson.Result, rev map[string]string) []*codexToolCallState {
-	callID := item.Get("call_id").String()
-	name := item.Get("name").String()
-	if original, ok := rev[name]; ok {
-		name = original
-	}
-
-	for _, state := range states {
-		if state != nil && state.CallID == callID && callID != "" {
-			if state.Name == "" {
-				state.Name = name
-			}
-			if state.Arguments.Len() == 0 {
-				state.Arguments.WriteString(item.Get("arguments").String())
-			}
-			return states
-		}
-	}
-
-	state := &codexToolCallState{CallID: callID, Name: name}
-	state.Arguments.WriteString(item.Get("arguments").String())
-	return append(states, state)
-}
-
-func buildCodexToolCalls(states []*codexToolCallState) []string {
-	if len(states) == 0 {
-		return nil
-	}
-
-	toolCalls := make([]string, 0, len(states))
-	for _, state := range states {
-		if state == nil {
-			continue
-		}
-		functionCallTemplate := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
-		if state.CallID != "" {
-			functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", state.CallID)
-		}
-		if state.Name != "" {
-			functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", state.Name)
-		}
-		if args := state.Arguments.String(); args != "" {
-			functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", args)
-		}
-		toolCalls = append(toolCalls, functionCallTemplate)
-	}
-	if len(toolCalls) == 0 {
-		return nil
-	}
-	return toolCalls
 }
 
 // buildReverseMapFromOriginalOpenAI builds a map of shortened tool name -> original tool name
@@ -546,4 +514,25 @@ func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 		}
 	}
 	return rev
+}
+
+func mimeTypeFromCodexOutputFormat(outputFormat string) string {
+	if outputFormat == "" {
+		return "image/png"
+	}
+	if strings.Contains(outputFormat, "/") {
+		return outputFormat
+	}
+	switch strings.ToLower(outputFormat) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
 }

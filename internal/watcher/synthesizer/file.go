@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,9 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
@@ -76,10 +78,31 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		return nil
 	}
 	t, _ := metadata["type"].(string)
-	if t == "" {
+	provider := strings.ToLower(strings.TrimSpace(t))
+	if ctx.PluginAuthParser != nil {
+		auth, handled, errParse := ctx.PluginAuthParser.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: provider,
+			Path:     fullPath,
+			FileName: filepath.Base(fullPath),
+			RawJSON:  data,
+		})
+		if errParse == nil && handled && auth != nil {
+			auth.CreatedAt = now
+			auth.UpdatedAt = now
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["path"] = fullPath
+			auth.Attributes["source"] = fullPath
+			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
+			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
+			coreauth.ApplyCustomHeadersFromMetadata(auth)
+			return []*coreauth.Auth{auth}
+		}
+	}
+	if provider == "" {
 		return nil
 	}
-	provider := strings.ToLower(t)
 	if provider == "gemini" {
 		provider = "gemini-cli"
 	}
@@ -157,6 +180,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, prefer explicit plan_type from metadata, then
 	// fall back to extracting it from the JWT id_token.
@@ -240,6 +264,11 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		// Propagate note from primary auth to virtual auths
 		if noteVal, hasNote := primary.Attributes["note"]; hasNote && noteVal != "" {
 			attrs["note"] = noteVal
+		}
+		for k, v := range primary.Attributes {
+			if strings.HasPrefix(k, "header:") && strings.TrimSpace(v) != "" {
+				attrs[k] = v
+			}
 		}
 		metadataCopy := map[string]any{
 			"email":             email,

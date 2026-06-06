@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -160,7 +160,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.cfg = newCfg
-	usage.SetStatisticsEnabled(newCfg.UsageStatisticsEnabled)
+	redisqueue.SetUsageStatisticsEnabled(newCfg.UsageStatisticsEnabled)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
@@ -206,7 +206,7 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 		h.cfg.UsageStatisticsEnabled = previousValue
 		return
 	}
-	usage.SetStatisticsEnabled(value)
+	redisqueue.SetUsageStatisticsEnabled(value)
 }
 
 // UsageStatisticsEnabled

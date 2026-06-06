@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type recordingExecutor struct {
@@ -130,8 +130,8 @@ func TestPatchAuthFileFields_UpdatesRuntimePriorityImmediately(t *testing.T) {
 	if got := updated.Attributes["priority"]; got != "10" {
 		t.Fatalf("expected runtime priority attribute %q, got %q", "10", got)
 	}
-	if got := updated.Metadata["priority"]; got != 10 {
-		t.Fatalf("expected persisted priority %d, got %#v", 10, got)
+	if got, ok := authFileIntValue(updated.Metadata["priority"]); !ok || got != 10 {
+		t.Fatalf("expected persisted priority %d, got %#v", 10, updated.Metadata["priority"])
 	}
 
 	var selectedAuthID string

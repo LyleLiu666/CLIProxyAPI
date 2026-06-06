@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	internalcodex "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	internalcodex "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestCodexBuildAuthRecord_PopulatesPlanTypeAttribute(t *testing.T) {
